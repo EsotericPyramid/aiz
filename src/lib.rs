@@ -1,8 +1,21 @@
 
-
 pub mod aiz {
+
+    pub fn flip_matrix<T: Copy>(matrix: &Vec<Vec<T>>) -> Vec<Vec<T>> {
+        //probably would be good if I could do this with iterators
+        //expects a perfectly rectangular matrix / Vec<Vec<t>>
+        let mut output_vec: Vec<Vec<T>> = Vec::new();
+        for current_index in 0..matrix[0].len() {
+            let mut intermediate_vec: Vec<T> = Vec::new();
+            for vec in matrix {
+                intermediate_vec.push(vec[current_index]);
+            }
+            output_vec.push(intermediate_vec);
+        }
+        output_vec
+    }
+
     pub struct NeuralNetwork {
-        e: f32,
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
         node_layout: Vec<usize>
@@ -32,7 +45,6 @@ pub mod aiz {
                 weights.push(layer_weights);
             }
             NeuralNetwork{
-            e: 2.71828, //euler's number, should use better approximation
             biases: biases,
             weights: weights,
             node_layout: node_layout
@@ -40,10 +52,27 @@ pub mod aiz {
         }
 
         pub fn run(&self,inputs: Vec<f64>) -> Vec<f64> {
+            let mut current_layer = inputs;
             for (layer_weights, layer_biases) in self.weights.iter().zip(self.biases.iter()) {
-                //Code
+                for (row_weights,row_bias) in flip_matrix(layer_weights).iter().zip(layer_biases.iter()) {
+                    current_layer = self.activation_function(row_weights.iter()
+                                                            .zip(current_layer
+                                                            .iter())
+                                                            .map(|(weight,activation)| weight*activation)
+                                                            .sum::<f64>()+row_bias)
+                }
             }
-            inputs //to get the compiler to shut up
+            current_layer
+        }
+
+        pub fn activation_function(&self, x: f64) -> f64 {
+            1.0/(1.0+x.exp())
+        }
+
+        pub fn derivative_activation_function(&self, x: f64) -> f64 {
+            let intermedite_num = self.activation_function(x);
+            intermedite_num*(1.0-intermedite_num)
+            //see if using a variable is faster than not using it
         }
     }
 }
