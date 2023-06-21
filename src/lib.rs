@@ -54,13 +54,15 @@ pub mod aiz {
         pub fn run(&self,inputs: Vec<f64>) -> Vec<f64> {
             let mut current_layer = inputs;
             for (layer_weights, layer_biases) in self.weights.iter().zip(self.biases.iter()) {
+                let mut new_current_layer = Vec::new();
                 for (row_weights,row_bias) in flip_matrix(layer_weights).iter().zip(layer_biases.iter()) {
-                    current_layer = self.activation_function(row_weights.iter()
+                    new_current_layer.push(self.activation_function(row_weights.iter()
                                                             .zip(current_layer
                                                             .iter())
                                                             .map(|(weight,activation)| weight*activation)
-                                                            .sum::<f64>()+row_bias)
+                                                            .sum::<f64>()+row_bias));
                 }
+                current_layer = new_current_layer;
             }
             current_layer
         }
