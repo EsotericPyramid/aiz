@@ -1,6 +1,7 @@
 
 pub mod aiz {
 
+    //should be optimizable
     pub fn flip_matrix<T: Copy>(matrix: &Vec<Vec<T>>) -> Vec<Vec<T>> {
         //probably would be good if I could do this with iterators
         //expects a perfectly rectangular matrix / Vec<Vec<t>>
@@ -51,10 +52,19 @@ pub mod aiz {
             }
         }
 
-        pub fn run(&self,inputs: Vec<f64>) -> Vec<f64> {
-            let mut current_layer = inputs;
-            for (layer_weights, layer_biases) in self.weights.iter().zip(self.biases.iter()) {
-                let mut new_current_layer = Vec::new();
+        pub fn run(&self,inputs: &Vec<f64>) -> Vec<f64> {
+            let mut current_layer = Vec::new();
+            for (row_weights,row_bias) in flip_matrix(&self.weights[0]).iter().zip(&self.biases[0]) {
+                current_layer.push(self.activation_function(row_weights.iter()
+                                                        .zip(inputs
+                                                        .iter())
+                                                        .map(|(weight,activation)| weight*activation)
+                                                        .sum::<f64>()+row_bias));
+            }
+            let mut layer_num = 1;
+            for (layer_weights, layer_biases) in self.weights[1..self.weights.len()].iter().zip(self.biases[1..self.weights.len()].iter()) {
+                layer_num += 1;
+                let mut new_current_layer = Vec::with_capacity(self.node_layout[layer_num]);
                 for (row_weights,row_bias) in flip_matrix(layer_weights).iter().zip(layer_biases.iter()) {
                     new_current_layer.push(self.activation_function(row_weights.iter()
                                                             .zip(current_layer
@@ -66,15 +76,31 @@ pub mod aiz {
             }
             current_layer
         }
-
-        pub fn activation_function(&self, x: f64) -> f64 {
+        
+        //I dont see a reason why an end-user would need these 2
+        fn activation_function(&self, x: f64) -> f64 {
             1.0/(1.0+x.exp())
         }
 
-        pub fn derivative_activation_function(&self, x: f64) -> f64 {
+        fn derivative_activation_function(&self, x: f64) -> f64 {
             let intermedite_num = self.activation_function(x);
             intermedite_num*(1.0-intermedite_num)
             //see if using a variable is faster than not using it
+        }
+
+        pub fn test(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64{
+            let mut all_costs = Vec::new();
+            for (inputs,expected_outputs) in training_data {
+                let experimental_outputs = self.run(inputs);
+                all_costs.push(
+                    expected_outputs.iter()
+                    .zip(experimental_outputs.iter())
+                    .map(|(single_experimental_out,single_expected_out)| {
+                        let dif = single_experimental_out-single_expected_out;
+                        dif*dif})
+                    .sum::<f64>());
+            }
+            all_costs.iter().sum::<f64>() / all_costs.len() as f64 //there may be a way to do this without converting to f64, albeit this is a small performance hit
         }
     }
 }
