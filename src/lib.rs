@@ -1,6 +1,6 @@
 
 pub mod aiz {
-
+    use rand::Rng;
     //should be optimizable
     pub fn flip_matrix<T: Copy>(matrix: &Vec<Vec<T>>) -> Vec<Vec<T>> {
         //probably would be good if I could do this with iterators
@@ -24,12 +24,13 @@ pub mod aiz {
 
     impl NeuralNetwork {
         pub fn new(node_layout: Vec<usize>) -> Self {
+            let mut rng = rand::thread_rng();
             let length = node_layout.len();
             let mut biases = Vec::with_capacity(length-1);
             for layer_size in node_layout[1..length].iter() {
                 let mut layer_biases = Vec::with_capacity(*layer_size);
                 for _ in 0..*layer_size {
-                    layer_biases.push(1.0); //CHANGE TO A RANDOM NUMBER, also see if rand doc has a fn for this kind of thing
+                    layer_biases.push(rng.gen()); //see if rand doc has a fn for this kind of thing
                 }
                 biases.push(layer_biases);
             }
@@ -39,7 +40,7 @@ pub mod aiz {
                 for _ in 0..*previous_layer_size {
                     let mut node_weights = Vec::with_capacity(*layer_size);
                     for _ in 0..*layer_size {
-                        node_weights.push(1.0); //SEE ABOVE
+                        node_weights.push(rng.gen());
                     }
                     layer_weights.push(node_weights);
                 }
