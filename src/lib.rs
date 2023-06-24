@@ -131,9 +131,9 @@ pub mod aiz {
             //see if using a variable is faster than not using it
         }
 
-        pub fn test(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64{
+        pub fn test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64{
             let mut all_costs = Vec::new();
-            for (inputs,expected_outputs) in training_data {
+            for (inputs,expected_outputs) in test_data {
                 let experimental_outputs = self.run(inputs);
                 all_costs.push(
                     expected_outputs.iter()
@@ -146,7 +146,7 @@ pub mod aiz {
             all_costs.iter().sum::<f64>() / all_costs.len() as f64 //there may be a way to do this without converting to f64, albeit this is a small performance hit
         }
 
-        pub fn core_back_propagation(self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
+        fn core_back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             //a lot of with_capacity optimizations to be made here
             let mut biases_gradients = Vec::new();
             let mut weights_gradients = Vec::new();
@@ -222,6 +222,83 @@ pub mod aiz {
                 final_weights_gradient.push(final_weights_layer_gradient);
             }
             (final_biases_gradient,final_weights_gradient)
+        }
+        
+        pub fn back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64) {
+            let mut current_granularity = 1.0;
+            //double testing done here, would be nice to avoid it
+            let mut previous_test = self.test(test_data);
+            println!("{}",previous_test);
+            //not using previous_biases and previous_weights here to avoid cloning, needs testing to see if better
+            //theoretically has worse precision
+            'main_loop: loop {
+                let (biases_gradient,weights_gradient) = self.core_back_propagation(training_data);
+                let mut greatest_movement = 0.0;
+                for column in biases_gradient.iter() {
+                    for bias in column {
+                        if &greatest_movement < bias {
+                            greatest_movement = *bias;
+                        }
+                    }
+                }
+                for layer in weights_gradient.iter() {
+                    for in_node in layer {
+                        for weight in in_node {
+                            if &greatest_movement < weight {
+                                greatest_movement = *weight;
+                            }
+                        }
+                    }
+                }
+                let mut multiplier = current_granularity/greatest_movement;
+                for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
+                    for (bias, movement) in column_biases.iter_mut().zip(column_gradient.iter()) {
+                        *bias -= movement*multiplier;
+                    }
+                }
+                for (layer_weights, layer_gradient) in self.weights.iter_mut().zip(weights_gradient.iter()) {
+                    for (in_node_weights,in_node_gradient) in layer_weights.iter_mut().zip(layer_gradient.iter()) {
+                        for (weight, movement) in in_node_weights.iter_mut().zip(in_node_gradient.iter()) {
+                            *weight -= movement*multiplier;
+                        }
+                    }
+                }
+                let mut new_test = self.test(test_data);
+                println!("{}",new_test);
+                while new_test > previous_test {
+                    current_granularity /= 2.0;
+                    multiplier /= 2.0 ;
+                    if current_granularity < min_granularity {
+                        for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
+                            for (bias, movement) in column_biases.iter_mut().zip(column_gradient.iter()) {
+                                *bias += movement*multiplier*2.0;
+                            }
+                        }
+                        for (layer_weights, layer_gradient) in self.weights.iter_mut().zip(weights_gradient.iter()) {
+                            for (in_node_weights,in_node_gradient) in layer_weights.iter_mut().zip(layer_gradient.iter()) {
+                                for (weight, movement) in in_node_weights.iter_mut().zip(in_node_gradient.iter()) {
+                                    *weight += movement*multiplier*2.0;
+                                }
+                            }
+                        }
+                        break 'main_loop;
+                    }
+                    for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
+                        for (bias, movement) in column_biases.iter_mut().zip(column_gradient.iter()) {
+                            *bias += movement*multiplier;
+                        }
+                    }
+                    for (layer_weights, layer_gradient) in self.weights.iter_mut().zip(weights_gradient.iter()) {
+                        for (in_node_weights,in_node_gradient) in layer_weights.iter_mut().zip(layer_gradient.iter()) {
+                            for (weight, movement) in in_node_weights.iter_mut().zip(in_node_gradient.iter()) {
+                                *weight += movement*multiplier;
+                            }
+                        }
+                    }
+                    new_test = self.test(test_data);
+                }
+                previous_test = new_test;
+            }
         }
     }
 }
