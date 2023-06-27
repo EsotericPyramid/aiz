@@ -44,7 +44,7 @@ pub mod aiz {
             for layer_size in node_layout[1..length].iter() {
                 let mut layer_biases = Vec::with_capacity(*layer_size);
                 for _ in 0..*layer_size {
-                    layer_biases.push(rng.gen()); //see if rand doc has a fn for this kind of thing
+                    layer_biases.push(2.0*rng.gen::<f64>()-1.0); //see if rand doc has a fn for this kind of thing, ALSO, generated nums are all from 0-1 and not -1 to 1
                 }
                 biases.push(layer_biases);
             }
@@ -54,7 +54,7 @@ pub mod aiz {
                 for _ in 0..*previous_layer_size {
                     let mut node_weights = Vec::with_capacity(*layer_size);
                     for _ in 0..*layer_size {
-                        node_weights.push(rng.gen());
+                        node_weights.push(2.0*rng.gen::<f64>()-1.0);
                     }
                     layer_weights.push(node_weights);
                 }
@@ -123,7 +123,7 @@ pub mod aiz {
 
         //I dont see a reason why an end-user would need these 2
         fn activation_function(&self, x: f64) -> f64 {
-            1.0/(1.0+x.exp())
+            1.0/(1.0+(-x).exp())
         }
 
         fn derivative_activation_function(&self, x: f64) -> f64 {
@@ -347,6 +347,7 @@ pub mod aiz {
                 while new_test > previous_test {
                     current_granularity /= 2.0;
                     println!("Granularity: {}",current_granularity);
+                    println!("Min Granularity: {}",min_granularity);
                     multiplier /= 2.0 ;
                     if current_granularity < min_granularity {
                         for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
@@ -426,6 +427,7 @@ pub mod aiz {
                 while new_test > previous_test {
                     current_granularity /= 2.0;
                     println!("Granularity: {}",current_granularity);
+                    println!("Min granularity: {}",min_granularity);
                     multiplier /= 2.0 ;
                     if current_granularity < min_granularity {
                         for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
