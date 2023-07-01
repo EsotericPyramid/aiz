@@ -44,7 +44,7 @@ pub mod aiz {
             for layer_size in node_layout[1..length].iter() {
                 let mut layer_biases = Vec::with_capacity(*layer_size);
                 for _ in 0..*layer_size {
-                    layer_biases.push(2.0*rng.gen::<f64>()-1.0); //see if rand doc has a fn for this kind of thing, ALSO, generated nums are all from 0-1 and not -1 to 1
+                    layer_biases.push(2.0*rng.gen::<f64>()-1.0); //see if rand doc has a fn for this kind of thing
                 }
                 biases.push(layer_biases);
             }
@@ -144,13 +144,37 @@ pub mod aiz {
                         dif*dif})
                     .sum::<f64>());
             }
-            all_costs.iter().sum::<f64>() / all_costs.len() as f64 //there may be a way to do this without converting to f64, albeit this is a small performance hit
+            all_costs.iter().sum::<f64>() / all_costs.len() as f64 //there may be a way to do this without converting to f64, albeit this is a small performance hit, 
         }
 
         fn core_back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             //a lot of with_capacity optimizations to be made here
+            /*
             let mut biases_gradients = Vec::new();
             let mut weights_gradients = Vec::new();
+            */
+            //testing out a running sum
+            let length = self.node_layout.len();
+            let mut final_biases_gradient = Vec::with_capacity(length-1);
+            for layer_size in self.node_layout[1..length].iter() {
+                let mut layer_biases = Vec::with_capacity(*layer_size);
+                for _ in 0..*layer_size {
+                    layer_biases.push(0.0); 
+                }
+                final_biases_gradient.push(layer_biases);
+            }
+            let mut final_weights_gradient = Vec::with_capacity(length-1);
+            for (previous_layer_size, layer_size) in self.node_layout[0..length-1].iter().zip(self.node_layout[1..length].iter()) {
+                let mut layer_weights = Vec::with_capacity(*previous_layer_size);
+                for _ in 0..*previous_layer_size {
+                    let mut node_weights = Vec::with_capacity(*layer_size);
+                    for _ in 0..*layer_size {
+                        node_weights.push(0.0);
+                    }
+                    layer_weights.push(node_weights);
+                }
+                final_weights_gradient.push(layer_weights);
+            }
             for (training_ex_in,training_ex_out) in training_data {
                 let mut biases_gradient = Vec::new();
                 let mut weights_gradient = Vec::new();
@@ -199,9 +223,26 @@ pub mod aiz {
                     }
                     layer_node_multipliers = new_layer_node_multipliers;
                 }
+                /*
                 biases_gradients.push(biases_gradient);
                 weights_gradients.push(weights_gradient);
+                */
+                //for the running sum
+                for (column_bias_gradient,final_column_bias_gradient) in biases_gradient.into_iter().rev().zip(final_biases_gradient.iter_mut()) {
+                    for (bias_gradient,final_bias_gradient) in column_bias_gradient.into_iter().zip(final_column_bias_gradient.iter_mut()) {
+                        *final_bias_gradient += bias_gradient;
+                    }
+                }
+                for (layer_weights_gradient,final_layer_weights_gradient) in weights_gradient.into_iter().rev().zip(final_weights_gradient.iter_mut()) {
+                    for (in_node_weights_gradient, final_in_node_weights_gradient) in layer_weights_gradient.into_iter().zip(final_layer_weights_gradient.iter_mut()) {
+                        for (weight_gradient,final_weight_gradient) in in_node_weights_gradient.into_iter().zip(final_in_node_weights_gradient.iter_mut()) {
+                            *final_weight_gradient += weight_gradient;
+                        }
+                    }
+                }
             }
+            //It would be a good idea to avoid doing this as ot requires a ton of memory, a better option would probably be to have a running sum and then divide em later
+            /*
             let mut final_biases_gradient = Vec::new();
             for column in flip_owned_matrix(biases_gradients) {
                 let mut final_biases_column_gradient = Vec::new();
@@ -223,12 +264,52 @@ pub mod aiz {
                 final_weights_gradient.push(final_weights_layer_gradient);
             }
             (final_biases_gradient,final_weights_gradient)
+            */
+            let num_examples = training_data.len() as f64;
+            for column in final_biases_gradient.iter_mut() {
+                for bias in column.iter_mut() {
+                    *bias /= num_examples;
+                }
+            }
+            for layer in final_weights_gradient.iter_mut() {
+                for in_node in layer.iter_mut() {
+                    for weight in in_node.iter_mut() {
+                        *weight /= num_examples;
+                    }
+                }
+            }
+
+            (final_biases_gradient,final_weights_gradient)
         }
 
         fn core_stochastic_back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>,num_considered: usize) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             //a lot of with_capacity optimizations to be made here
+            /* 
             let mut biases_gradients = Vec::new();
             let mut weights_gradients = Vec::new();
+            */
+            //testing out a running sum
+            let length = self.node_layout.len();
+            let mut final_biases_gradient = Vec::with_capacity(length-1);
+            for layer_size in self.node_layout[1..length].iter() {
+                let mut layer_biases = Vec::with_capacity(*layer_size);
+                for _ in 0..*layer_size {
+                    layer_biases.push(0.0); 
+                }
+                final_biases_gradient.push(layer_biases);
+            }
+            let mut final_weights_gradient = Vec::with_capacity(length-1);
+            for (previous_layer_size, layer_size) in self.node_layout[0..length-1].iter().zip(self.node_layout[1..length].iter()) {
+                let mut layer_weights = Vec::with_capacity(*previous_layer_size);
+                for _ in 0..*previous_layer_size {
+                    let mut node_weights = Vec::with_capacity(*layer_size);
+                    for _ in 0..*layer_size {
+                        node_weights.push(0.0);
+                    }
+                    layer_weights.push(node_weights);
+                }
+                final_weights_gradient.push(layer_weights);
+            }
             for (training_ex_in,training_ex_out) in training_data.choose_multiple(&mut rand::thread_rng(),num_considered) {
                 let mut biases_gradient = Vec::new();
                 let mut weights_gradient = Vec::new();
@@ -277,9 +358,26 @@ pub mod aiz {
                     }
                     layer_node_multipliers = new_layer_node_multipliers;
                 }
+                /*
                 biases_gradients.push(biases_gradient);
                 weights_gradients.push(weights_gradient);
+                */
+                //For the running sum
+                for (column_bias_gradient,final_column_bias_gradient) in biases_gradient.into_iter().rev().zip(final_biases_gradient.iter_mut()) {
+                    for (bias_gradient,final_bias_gradient) in column_bias_gradient.into_iter().zip(final_column_bias_gradient.iter_mut()) {
+                        *final_bias_gradient += bias_gradient;
+                    }
+                }
+                for (layer_weights_gradient,final_layer_weights_gradient) in weights_gradient.into_iter().rev().zip(final_weights_gradient.iter_mut()) {
+                    for (in_node_weights_gradient, final_in_node_weights_gradient) in layer_weights_gradient.into_iter().zip(final_layer_weights_gradient.iter_mut()) {
+                        for (weight_gradient,final_weight_gradient) in in_node_weights_gradient.into_iter().zip(final_in_node_weights_gradient.iter_mut()) {
+                            *final_weight_gradient += weight_gradient;
+                        }
+                    }
+                }
             }
+            //It would be a good idea to avoid doing this as ot requires a ton of memory, a better option would probably be to have a running sum and then divide em later
+            /*
             let mut final_biases_gradient = Vec::new();
             for column in flip_owned_matrix(biases_gradients) {
                 let mut final_biases_column_gradient = Vec::new();
@@ -300,6 +398,22 @@ pub mod aiz {
                 }
                 final_weights_gradient.push(final_weights_layer_gradient);
             }
+            (final_biases_gradient,final_weights_gradient)
+            */
+            let num_examples = num_considered as f64;
+            for column in final_biases_gradient.iter_mut() {
+                for bias in column.iter_mut() {
+                    *bias /= num_examples;
+                }
+            }
+            for layer in final_weights_gradient.iter_mut() {
+                for in_node in layer.iter_mut() {
+                    for weight in in_node.iter_mut() {
+                        *weight /= num_examples;
+                    }
+                }
+            }
+
             (final_biases_gradient,final_weights_gradient)
         }
         
