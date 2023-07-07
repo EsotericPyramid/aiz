@@ -417,11 +417,13 @@ pub mod aiz {
             (final_biases_gradient,final_weights_gradient)
         }
         
-        pub fn back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64) {
+        pub fn back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, is_silent: bool) {
             let mut current_granularity = 1.0;
             //double testing done here, would be nice to avoid it
             let mut previous_test = self.test(test_data);
-            println!("Test: {}",previous_test);
+            if !is_silent {
+                println!("Test: {}",previous_test);
+            }
             //not using previous_biases and previous_weights here to avoid cloning, needs testing to see if better
             //theoretically has worse precision
             'main_loop: loop {
@@ -457,11 +459,15 @@ pub mod aiz {
                     }
                 }
                 let mut new_test = self.test(test_data);
-                println!("Test: {}",new_test);
+                if !is_silent {
+                    println!("Test: {}",new_test);
+                }
                 while new_test > previous_test {
                     current_granularity /= 2.0;
-                    println!("Granularity: {}",current_granularity);
-                    println!("Min Granularity: {}",min_granularity);
+                    if !is_silent {
+                        println!("Granularity: {}",current_granularity);
+                        println!("Min Granularity: {}",min_granularity);
+                    }
                     multiplier /= 2.0 ;
                     if current_granularity < min_granularity {
                         for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
@@ -491,17 +497,21 @@ pub mod aiz {
                         }
                     }
                     new_test = self.test(test_data);
-                    println!("Test: {}",new_test);
+                    if !is_silent {
+                        println!("Test: {}",new_test);
+                    }
                 }
                 previous_test = new_test;
             }
         }
 
-        pub fn stochastic_back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, num_considered_in_iteration: usize) {
+        pub fn stochastic_back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, num_considered_in_iteration: usize, is_silent: bool) {
             let mut current_granularity = 1.0;
             //double testing done here, would be nice to avoid it
             let mut previous_test = self.test(test_data);
-            println!("Test: {}",previous_test);
+            if !is_silent {
+                println!("Test: {}",previous_test);
+            }
             //not using previous_biases and previous_weights here to avoid cloning, needs testing to see if better
             //theoretically has worse precision
             'main_loop: loop {
@@ -537,11 +547,15 @@ pub mod aiz {
                     }
                 }
                 let mut new_test = self.test(test_data);
-                println!("Test: {}",new_test);
+                if !is_silent {
+                    println!("Test: {}",new_test);
+                }
                 while new_test > previous_test {
                     current_granularity /= 2.0;
-                    println!("Granularity: {}",current_granularity);
-                    println!("Min granularity: {}",min_granularity);
+                    if !is_silent {
+                        println!("Granularity: {}",current_granularity);
+                        println!("Min granularity: {}",min_granularity);
+                    }
                     multiplier /= 2.0 ;
                     if current_granularity < min_granularity {
                         for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
@@ -571,25 +585,12 @@ pub mod aiz {
                         }
                     }
                     new_test = self.test(test_data);
-                    println!("Test: {}",new_test);
+                    if !is_silent {
+                        println!("Test: {}",new_test);
+                    }
                 }
                 previous_test = new_test;
             }
         }
-    }
-}
-
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
     }
 }
