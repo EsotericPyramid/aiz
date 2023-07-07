@@ -97,18 +97,29 @@ fn read_n_parse_dataset() -> (Vec<(Vec<f64>,Vec<f64>)>,Vec<(Vec<f64>,Vec<f64>)>)
 fn main() {
     let (training_data,test_data) = read_n_parse_dataset();
     println!("all data processed");
-    let mut nn = aiz::NeuralNetwork::new(vec![784,20,20,10]);
-    nn.back_propagation(&training_data, &test_data, (-30.0_f64).exp2());
+    let mut best_nn = aiz::NeuralNetwork::new(vec![1,1]);
+    let mut best_nn_score = 10000.0;
+    for _ in 0..20 {
+        let mut nn = aiz::NeuralNetwork::new(vec![784,12,12,10]);
+        nn.back_propagation(&training_data, &test_data, (-3.0_f64).exp2(), true);
+        let nn_score = nn.test(&test_data);
+        if nn_score < best_nn_score {
+            println!("{}",nn_score);
+            best_nn = nn;
+            best_nn_score = nn_score;
+        }
+    }
+    best_nn.back_propagation(&training_data, &test_data, (-20.0_f64).exp2(), false);
     let mut num_correct = 0;
     for example in training_data {
-        if vec_to_label(nn.run(&example.0)) == vec_to_label(example.1) {
+        if vec_to_label(best_nn.run(&example.0)) == vec_to_label(example.1) {
             num_correct += 1;
         }
     }
     println!("{}",num_correct);
     let mut num_correct = 0;
     for example in test_data {
-        if vec_to_label(nn.run(&example.0)) == vec_to_label(example.1) {
+        if vec_to_label(best_nn.run(&example.0)) == vec_to_label(example.1) {
             num_correct += 1;
         }
     }
