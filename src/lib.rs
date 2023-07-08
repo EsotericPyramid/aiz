@@ -54,6 +54,7 @@ pub mod aiz {
 
         greatest_movement
     }
+
     pub struct NeuralNetwork {
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
@@ -156,7 +157,7 @@ pub mod aiz {
             //see if using a variable is faster than not using it
         }
 
-        pub fn test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64{
+        pub fn test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64 {
             let mut all_costs = Vec::new();
             for (inputs,expected_outputs) in test_data {
                 let experimental_outputs = self.run(inputs);
@@ -169,6 +170,55 @@ pub mod aiz {
                     .sum::<f64>());
             }
             all_costs.iter().sum::<f64>() / all_costs.len() as f64 //there may be a way to do this without converting to f64, albeit this is a small performance hit, 
+        }
+
+        pub fn multithreaded_test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>,num_test_data_partitions: f64) -> f64 {
+            let data_length = test_data.len();
+            let exact_partition_size = data_length as f64 / num_test_data_partitions;
+            let mut partitioned_test_data = Vec::new();
+            let mut current_partition = Vec::new();
+            let mut current_partition_point = exact_partition_size;
+            for (example_num,example) in test_data.iter().enumerate() {
+                if (example_num as f64) < current_partition_point {
+                    current_partition.push(example);
+                } else {
+                    current_partition_point += exact_partition_size;
+                    partitioned_test_data.push(current_partition);
+                    current_partition = Vec::new();
+                    current_partition.push(example);
+                }
+            }
+            self.prepartitioned_multithreaded_test(&partitioned_test_data)
+        }
+
+        fn prepartitioned_multithreaded_test(&self, test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64 {
+            let mut total_cost = 0.0;
+            crossbeam::scope(|scope| {
+                let (original_transmitter,receiver) = mpsc::channel();
+                for partition in test_data {
+                    let thread_transmitter = original_transmitter.clone();
+                    scope.spawn(move |_| {
+                        for (test_in,test_expected_out) in partition {
+                            let test_experimental_out = self.run(test_in);
+                            let cost = test_expected_out.iter()
+                                .zip(test_experimental_out.iter())
+                                .map(|(single_experimental_out,single_expected_out)| {
+                                    let dif = single_experimental_out-single_expected_out;
+                                    dif*dif
+                                })
+                                .sum::<f64>();
+                            
+                            thread_transmitter.send(cost).unwrap();
+                        }
+                    });
+                };
+                drop(original_transmitter); //so it doesn't block the reciever
+
+                for cost in receiver {
+                    total_cost += cost;
+                }
+            }).unwrap();
+            total_cost/test_data.len() as f64
         }
 
         fn apply_gradient(&mut self,biases_gradient: &Vec<Vec<f64>>,weights_gradient: &Vec<Vec<Vec<f64>>>,multiplier: f64) {
