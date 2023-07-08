@@ -420,7 +420,8 @@ pub mod aiz {
             (final_biases_gradient,final_weights_gradient)
         }
         
-        fn core_multithreaded_back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
+        //works but not as well as I would like
+        fn core_multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             let length = self.node_layout.len();
             let mut final_biases_gradient = Vec::with_capacity(length-1);
             for layer_size in self.node_layout[1..length].iter() {
@@ -444,62 +445,68 @@ pub mod aiz {
             }
 
             //multithreading specific stuff
-            let (original_transmitter,reciever) = mpsc::channel();
             crossbeam::scope(|scope| {
-                for (training_ex_in,training_ex_out) in training_data {
+                let (original_transmitter,reciever) = mpsc::channel();
+                for partition in partitioned_training_data {
                     let transmitter = original_transmitter.clone();
                     scope.spawn(move |_| {
-                        let mut biases_gradient = Vec::new();
-                        let mut weights_gradient = Vec::new();
-                        let layer_vals = self.special_run(training_ex_in);
-                        let mut layer_node_multipliers = Vec::new(); //there may be a specific func for this
-                        for _ in 0..layer_vals[layer_vals.len()-1].len() {
-                            layer_node_multipliers.push(1.0);
-                        }
-                        let temp_layer_vals: Vec<&Vec<f64>> = layer_vals[0..layer_vals.len()].iter().rev().collect(); //JANK, originally to avoid lazyness in python
-                        let mut temp_layer_node_multpliers: Vec<f64>;
-                        for (current_layer_vals,(layer_weights,(layer_biases,(layer_num,previous_layer_vals)))) in 
-                        layer_vals.iter().rev().zip(self.weights.iter().rev().zip(self.biases.iter().rev().zip((0..layer_vals.len()).into_iter().zip(temp_layer_vals.iter())))) {
-                            let mut layer_biases_gradient = Vec::new();
-                            let mut layer_weights_gradient = Vec::new();
-                            temp_layer_node_multpliers = Vec::new();
-                            if layer_num == 0 {
-                                for (out_node_val,(out_node_back_weights,(out_node_bias,out_node_expected_val))) in
-                                current_layer_vals.iter().zip(flip_matrix(layer_weights).iter().zip(layer_biases.iter().zip(training_ex_out.iter()))) {
-                                    let out_node_multiplier = self.derivative_activation_function(previous_layer_vals.iter()
-                                                                                                        .zip(out_node_back_weights.iter())
-                                                                                                        .map(|(previous_activation,weight)| previous_activation*weight)
-                                                                                                        .sum::<f64>() 
-                                                                                                        + out_node_bias) * 2.0 * (out_node_val-out_node_expected_val);
-                                    layer_biases_gradient.push(out_node_multiplier);
-                                    layer_weights_gradient.push(previous_layer_vals.iter().map(|in_node_activation| in_node_activation*out_node_multiplier).collect::<Vec<f64>>());
-                                    temp_layer_node_multpliers.push(out_node_multiplier);
-                                }
-                            } else {
-                                for (out_node_back_weights,(out_node_bias,out_node_multiplier)) in 
-                                flip_matrix(layer_weights).iter().zip(layer_biases.iter().zip(layer_node_multipliers.iter())) {
-                                    let out_node_multiplier = self.derivative_activation_function(previous_layer_vals.iter()
-                                                                                                        .zip(out_node_back_weights.iter())
-                                                                                                        .map(|(previous_activation,weight)| previous_activation*weight)
-                                                                                                        .sum::<f64>() 
-                                                                                                        + out_node_bias) * out_node_multiplier;
-                                    layer_biases_gradient.push(out_node_multiplier);
-                                    layer_weights_gradient.push(previous_layer_vals.iter().map(|in_node_activation| in_node_activation*out_node_multiplier).collect::<Vec<f64>>());
-                                    temp_layer_node_multpliers.push(out_node_multiplier);
-                                }
+                        for (training_ex_in,training_ex_out) in partition {
+                            let mut biases_gradient = Vec::new();
+                            let mut weights_gradient = Vec::new();
+                            let layer_vals = self.special_run(training_ex_in);
+                            let mut layer_node_multipliers = Vec::new(); //there may be a specific func for this
+                            for _ in 0..layer_vals[layer_vals.len()-1].len() {
+                                layer_node_multipliers.push(1.0);
                             }
-                            biases_gradient.push(layer_biases_gradient);
-                            weights_gradient.push(layer_weights_gradient);
-                            let mut new_layer_node_multipliers = Vec::new();
-                            for in_node in layer_weights {
-                                new_layer_node_multipliers.push(in_node.iter().zip(temp_layer_node_multpliers.iter()).map(|(weight,multiplier)| weight*multiplier).sum::<f64>());
+                            let temp_layer_vals: Vec<&Vec<f64>> = layer_vals[0..layer_vals.len()].iter().rev().collect(); //JANK, originally to avoid lazyness in python
+                            let mut temp_layer_node_multpliers: Vec<f64>;
+                            for (current_layer_vals,(layer_weights,(layer_biases,(layer_num,previous_layer_vals)))) in 
+                            layer_vals.iter().rev().zip(self.weights.iter().rev().zip(self.biases.iter().rev().zip((0..layer_vals.len()).into_iter().zip(temp_layer_vals.iter())))) {
+                                let mut layer_biases_gradient = Vec::new();
+                                let mut layer_weights_gradient = Vec::new();
+                                temp_layer_node_multpliers = Vec::new();
+                                if layer_num == 0 {
+                                    for (out_node_val,(out_node_back_weights,(out_node_bias,out_node_expected_val))) in
+                                    current_layer_vals.iter().zip(flip_matrix(layer_weights).iter().zip(layer_biases.iter().zip(training_ex_out.iter()))) {
+                                        let out_node_multiplier = self.derivative_activation_function(previous_layer_vals.iter()
+                                                                                                            .zip(out_node_back_weights.iter())
+                                                                                                            .map(|(previous_activation,weight)| previous_activation*weight)
+                                                                                                            .sum::<f64>() 
+                                                                                                            + out_node_bias) * 2.0 * (out_node_val-out_node_expected_val);
+                                        layer_biases_gradient.push(out_node_multiplier);
+                                        layer_weights_gradient.push(previous_layer_vals.iter().map(|in_node_activation| in_node_activation*out_node_multiplier).collect::<Vec<f64>>());
+                                        temp_layer_node_multpliers.push(out_node_multiplier);
+                                    }
+                                } else {
+                                    for (out_node_back_weights,(out_node_bias,out_node_multiplier)) in 
+                                    flip_matrix(layer_weights).iter().zip(layer_biases.iter().zip(layer_node_multipliers.iter())) {
+                                        let out_node_multiplier = self.derivative_activation_function(previous_layer_vals.iter()
+                                                                                                            .zip(out_node_back_weights.iter())
+                                                                                                            .map(|(previous_activation,weight)| previous_activation*weight)
+                                                                                                            .sum::<f64>() 
+                                                                                                            + out_node_bias) * out_node_multiplier;
+                                        layer_biases_gradient.push(out_node_multiplier);
+                                        layer_weights_gradient.push(previous_layer_vals.iter().map(|in_node_activation| in_node_activation*out_node_multiplier).collect::<Vec<f64>>());
+                                        temp_layer_node_multpliers.push(out_node_multiplier);
+                                    }
+                                }
+                                biases_gradient.push(layer_biases_gradient);
+                                weights_gradient.push(layer_weights_gradient);
+                                let mut new_layer_node_multipliers = Vec::new();
+                                for in_node in layer_weights {
+                                    new_layer_node_multipliers.push(in_node.iter().zip(temp_layer_node_multpliers.iter()).map(|(weight,multiplier)| weight*multiplier).sum::<f64>());
+                                }
+                                layer_node_multipliers = new_layer_node_multipliers;
+    
                             }
-                            layer_node_multipliers = new_layer_node_multipliers;
-
+                            transmitter.send((biases_gradient,weights_gradient)).unwrap();
                         }
-                        transmitter.send((biases_gradient,weights_gradient)).unwrap();
                     });
                 }
+                //to drop the original transmitter, although pretty jank
+                {
+                    original_transmitter
+                };
 
                 for (biases_gradient,weights_gradient) in reciever {
                     for (column_bias_gradient,final_column_bias_gradient) in biases_gradient.into_iter().rev().zip(final_biases_gradient.iter_mut()) {
@@ -516,7 +523,11 @@ pub mod aiz {
                     }
                 }
             }).unwrap();
-            let num_examples = training_data.len() as f64;
+            let mut num_examples = 0;
+            for partition in partitioned_training_data {
+                num_examples += partition.len();
+            }
+            let num_examples = num_examples as f64;
             for column in final_biases_gradient.iter_mut() {
                 for bias in column.iter_mut() {
                     *bias /= num_examples;
@@ -709,17 +720,34 @@ pub mod aiz {
             }
         }
     
-        pub fn multithreaded_back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, is_silent: bool) {
+        pub fn multithreaded_back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, num_training_data_partitions: f64, is_silent: bool) {
             let mut current_granularity = 1.0;
             //double testing done here, would be nice to avoid it
             let mut previous_test = self.test(test_data);
             if !is_silent {
                 println!("Test: {}",previous_test);
             }
+            //partitioning the data
+            let data_length = training_data.len();
+            let exact_partition_size = data_length as f64 / num_training_data_partitions;
+            let mut partitioned_training_data = Vec::new();
+            let mut current_partition = Vec::new();
+            let mut current_partition_point = exact_partition_size;
+            for (example_num,example) in training_data.iter().enumerate() {
+                if (example_num as f64) < current_partition_point {
+                    current_partition.push(example);
+                } else {
+                    current_partition_point += exact_partition_size;
+                    partitioned_training_data.push(current_partition);
+                    current_partition = Vec::new();
+                    current_partition.push(example);
+                }
+            }
+            partitioned_training_data.push(current_partition);
             //not using previous_biases and previous_weights here to avoid cloning, needs testing to see if better
             //theoretically has worse precision
             'main_loop: loop {
-                let (biases_gradient,weights_gradient) = self.core_multithreaded_back_propagation(training_data);
+                let (biases_gradient,weights_gradient) = self.core_multithreaded_back_propagation(&partitioned_training_data);
                 let mut greatest_movement = 0.0;
                 for column in biases_gradient.iter() {
                     for bias in column {
