@@ -150,6 +150,21 @@ pub mod aiz {
             all_costs.iter().sum::<f64>() / all_costs.len() as f64 //there may be a way to do this without converting to f64, albeit this is a small performance hit, 
         }
 
+        fn apply_gradient(&mut self,biases_gradient: Vec<Vec<f64>>,weights_gradient: Vec<Vec<Vec<f64>>>,multiplier: f64) {
+            for (column_biases, column_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
+                for (bias, movement) in column_biases.iter_mut().zip(column_gradient.iter()) {
+                    *bias -= movement*multiplier;
+                }
+            }
+            for (layer_weights, layer_gradient) in self.weights.iter_mut().zip(weights_gradient.iter()) {
+                for (in_node_weights,in_node_gradient) in layer_weights.iter_mut().zip(layer_gradient.iter()) {
+                    for (weight, movement) in in_node_weights.iter_mut().zip(in_node_gradient.iter()) {
+                        *weight -= movement*multiplier;
+                    }
+                }
+            }
+        }
+
         fn core_back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             //a lot of with_capacity optimizations to be made here
             /*
