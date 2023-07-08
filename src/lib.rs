@@ -6,6 +6,8 @@ pub mod aiz {
     use std::sync::mpsc;
 
     //should be optimizable
+    //may be possible to have it do output Vec<Vec<&T>> and avoid needing Copy and possibly being faster
+    //will need to check
     pub fn flip_matrix<T: Copy>(matrix: &Vec<Vec<T>>) -> Vec<Vec<T>> {
         //probably would be good if I could do this with iterators
         //expects a perfectly rectangular matrix / Vec<Vec<t>>
@@ -55,6 +57,24 @@ pub mod aiz {
         greatest_movement
     }
 
+    pub fn partition_data<T>(data: &Vec<T>, num_partitions: f64) -> Vec<Vec<&T>> {
+        let exact_partition_size = data.len() as f64 / num_partitions;
+        let mut partitioned_data = Vec::new();
+        let mut current_partition = Vec::new();
+        let mut current_partition_point = exact_partition_size;
+        for (example_num,example) in data.iter().enumerate() {
+            if (example_num as f64) < current_partition_point {
+                current_partition.push(example);
+            } else {
+                current_partition_point += exact_partition_size;
+                partitioned_data.push(current_partition);
+                current_partition = Vec::new();
+                current_partition.push(example);
+            }
+        }
+        partitioned_data.push(current_partition);
+        partitioned_data
+    }
     pub struct NeuralNetwork {
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
@@ -173,25 +193,10 @@ pub mod aiz {
         }
 
         pub fn multithreaded_test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>,num_test_data_partitions: f64) -> f64 {
-            let data_length = test_data.len();
-            let exact_partition_size = data_length as f64 / num_test_data_partitions;
-            let mut partitioned_test_data = Vec::new();
-            let mut current_partition = Vec::new();
-            let mut current_partition_point = exact_partition_size;
-            for (example_num,example) in test_data.iter().enumerate() {
-                if (example_num as f64) < current_partition_point {
-                    current_partition.push(example);
-                } else {
-                    current_partition_point += exact_partition_size;
-                    partitioned_test_data.push(current_partition);
-                    current_partition = Vec::new();
-                    current_partition.push(example);
-                }
-            }
-            self.prepartitioned_multithreaded_test(&partitioned_test_data)
+            self.prepartitioned_multithreaded_test(&partition_data(test_data, num_test_data_partitions))
         }
 
-        fn prepartitioned_multithreaded_test(&self, test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64 {
+        pub fn prepartitioned_multithreaded_test(&self, test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64 {
             let mut total_cost = 0.0;
             crossbeam::scope(|scope| {
                 let (original_transmitter,receiver) = mpsc::channel();
@@ -218,7 +223,11 @@ pub mod aiz {
                     total_cost += cost;
                 }
             }).unwrap();
-            total_cost/test_data.len() as f64
+            let mut num_examples = 0;
+            for partition in test_data {
+                num_examples += partition.len();
+            }
+            total_cost/num_examples as f64
         }
 
         fn apply_gradient(&mut self,biases_gradient: &Vec<Vec<f64>>,weights_gradient: &Vec<Vec<Vec<f64>>>,multiplier: f64) {
@@ -436,7 +445,6 @@ pub mod aiz {
             (final_biases_gradient,final_weights_gradient)
         }
         
-        //works but not as well as I would like
         fn core_multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             let length = self.node_layout.len();
             let mut final_biases_gradient = Vec::with_capacity(length-1);
@@ -636,37 +644,21 @@ pub mod aiz {
             }
         }
     
-        pub fn multithreaded_back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, num_training_data_partitions: f64, is_silent: bool) {
+        pub fn multithreaded_back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, num_data_partitions: f64, is_silent: bool) {
             let mut current_granularity = 1.0;
-            //double testing done here, would be nice to avoid it
-            let mut previous_test = self.test(test_data);
+            //partitioning the data
+            let partitioned_training_data = partition_data(training_data, num_data_partitions);
+            let partitioned_test_data = partition_data(test_data, num_data_partitions);
+            //double running done here, one pass in back prop, the other in test, would be nice to avoid it
+            let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_test_data);
             if !is_silent {
                 println!("Test: {}",previous_test);
             }
-            //partitioning the data
-            let data_length = training_data.len();
-            let exact_partition_size = data_length as f64 / num_training_data_partitions;
-            let mut partitioned_training_data = Vec::new();
-            let mut current_partition = Vec::new();
-            let mut current_partition_point = exact_partition_size;
-            for (example_num,example) in training_data.iter().enumerate() {
-                if (example_num as f64) < current_partition_point {
-                    current_partition.push(example);
-                } else {
-                    current_partition_point += exact_partition_size;
-                    partitioned_training_data.push(current_partition);
-                    current_partition = Vec::new();
-                    current_partition.push(example);
-                }
-            }
-            partitioned_training_data.push(current_partition);
-            //not using previous_biases and previous_weights here to avoid cloning, needs testing to see if better
-            //theoretically has worse precision
             'main_loop: loop {
                 let (biases_gradient,weights_gradient) = self.core_multithreaded_back_propagation(&partitioned_training_data);
                 let mut multiplier = current_granularity/find_greatest_movement_in_gradients(&biases_gradient, &weights_gradient);
                 self.apply_gradient(&biases_gradient, &weights_gradient, multiplier);
-                let mut new_test = self.test(test_data);
+                let mut new_test = self.prepartitioned_multithreaded_test(&partitioned_test_data);
                 if !is_silent {
                     println!("Test: {}",new_test);
                 }
@@ -682,7 +674,7 @@ pub mod aiz {
                     }
                     multiplier /= 2.0;
                     self.apply_gradient(&biases_gradient,&weights_gradient,multiplier*-1.0);
-                    new_test = self.test(test_data);
+                    new_test = self.prepartitioned_multithreaded_test(&partitioned_test_data);
                     if !is_silent {
                         println!("Test: {}",new_test);
                     }
