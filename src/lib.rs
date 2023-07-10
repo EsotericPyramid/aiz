@@ -319,6 +319,7 @@ pub mod aiz {
                 final_weights_gradient.push(layer_weights);
             }
             for (training_ex_in,training_ex_out) in training_data {
+                /*
                 let mut biases_gradient = Vec::new();
                 let mut weights_gradient = Vec::new();
                 let layer_vals = self.special_run(training_ex_in);
@@ -366,6 +367,8 @@ pub mod aiz {
                     }
                     layer_node_multipliers = new_layer_node_multipliers;
                 }
+                */
+                let (biases_gradient,weights_gradient) = self.one_example_back_propagation(training_ex_in, training_ex_out);
                 for (column_bias_gradient,final_column_bias_gradient) in biases_gradient.into_iter().rev().zip(final_biases_gradient.iter_mut()) {
                     for (bias_gradient,final_bias_gradient) in column_bias_gradient.into_iter().zip(final_column_bias_gradient.iter_mut()) {
                         *final_bias_gradient += bias_gradient;
@@ -419,6 +422,7 @@ pub mod aiz {
                 final_weights_gradient.push(layer_weights);
             }
             for (training_ex_in,training_ex_out) in training_data.choose_multiple(&mut rand::thread_rng(),num_considered) {
+                /*
                 let mut biases_gradient = Vec::new();
                 let mut weights_gradient = Vec::new();
                 let layer_vals = self.special_run(training_ex_in);
@@ -466,6 +470,8 @@ pub mod aiz {
                     }
                     layer_node_multipliers = new_layer_node_multipliers;
                 }
+                */
+                let (biases_gradient,weights_gradient) = self.one_example_back_propagation(training_ex_in, training_ex_out);
                 for (column_bias_gradient,final_column_bias_gradient) in biases_gradient.into_iter().rev().zip(final_biases_gradient.iter_mut()) {
                     for (bias_gradient,final_bias_gradient) in column_bias_gradient.into_iter().zip(final_column_bias_gradient.iter_mut()) {
                         *final_bias_gradient += bias_gradient;
@@ -526,6 +532,7 @@ pub mod aiz {
                     let transmitter = original_transmitter.clone();
                     scope.spawn(move |_| {
                         for (training_ex_in,training_ex_out) in partition {
+                            /*
                             let mut biases_gradient = Vec::new();
                             let mut weights_gradient = Vec::new();
                             let layer_vals = self.special_run(training_ex_in);
@@ -572,9 +579,9 @@ pub mod aiz {
                                     new_layer_node_multipliers.push(in_node.iter().zip(temp_layer_node_multpliers.iter()).map(|(weight,multiplier)| weight*multiplier).sum::<f64>());
                                 }
                                 layer_node_multipliers = new_layer_node_multipliers;
-    
                             }
-                            transmitter.send((biases_gradient,weights_gradient)).unwrap();
+                            */
+                            transmitter.send(self.one_example_back_propagation(training_ex_in, training_ex_out)).unwrap();//(biases_gradient,weights_gradient)).unwrap();
                         }
                     });
                 }
