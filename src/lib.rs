@@ -39,16 +39,16 @@ pub mod aiz {
         let mut greatest_movement = 0.0;
         for column in biases_gradient.iter() {
             for bias in column {
-                if &greatest_movement < bias {
-                    greatest_movement = *bias;
+                if greatest_movement < bias.abs() {
+                    greatest_movement = bias.abs();
                 }
             }
         }
         for layer in weights_gradient.iter() {
             for in_node in layer {
                 for weight in in_node {
-                    if &greatest_movement < weight {
-                        greatest_movement = *weight;
+                    if greatest_movement < weight.abs() {
+                        greatest_movement = weight.abs();
                     }
                 }
             }
@@ -243,6 +243,57 @@ pub mod aiz {
                     }
                 }
             }
+        }
+
+        fn one_example_back_propagation(&self,training_ex_in: &Vec<f64>,training_ex_out: &Vec<f64>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
+            let mut biases_gradient = Vec::new();
+            let mut weights_gradient = Vec::new();
+            let layer_vals = self.special_run(training_ex_in);
+            let mut layer_node_multipliers = Vec::new(); //there may be a specific func for this
+            for _ in 0..layer_vals[layer_vals.len()-1].len() {
+                layer_node_multipliers.push(1.0);
+            }
+            let temp_layer_vals: Vec<&Vec<f64>> = layer_vals[0..layer_vals.len()].iter().rev().collect(); //JANK, originally to avoid lazyness in python
+            let mut temp_layer_node_multpliers: Vec<f64>;
+            for (current_layer_vals,(layer_weights,(layer_biases,(layer_num,previous_layer_vals)))) in 
+            layer_vals.iter().rev().zip(self.weights.iter().rev().zip(self.biases.iter().rev().zip((0..layer_vals.len()).into_iter().zip(temp_layer_vals.iter())))) {
+                let mut layer_biases_gradient = Vec::new();
+                let mut layer_weights_gradient = Vec::new();
+                temp_layer_node_multpliers = Vec::new();
+                if layer_num == 0 {
+                    for (out_node_val,(out_node_back_weights,(out_node_bias,out_node_expected_val))) in
+                    current_layer_vals.iter().zip(flip_matrix(layer_weights).iter().zip(layer_biases.iter().zip(training_ex_out.iter()))) {
+                        let out_node_multiplier = self.derivative_activation_function(previous_layer_vals.iter()
+                                                                                            .zip(out_node_back_weights.iter())
+                                                                                            .map(|(previous_activation,weight)| previous_activation*weight)
+                                                                                            .sum::<f64>() 
+                                                                                            + out_node_bias) * 2.0 * (out_node_val-out_node_expected_val);
+                        layer_biases_gradient.push(out_node_multiplier);
+                        layer_weights_gradient.push(previous_layer_vals.iter().map(|in_node_activation| in_node_activation*out_node_multiplier).collect::<Vec<f64>>());
+                        temp_layer_node_multpliers.push(out_node_multiplier);
+                    }
+                } else {
+                    for (out_node_back_weights,(out_node_bias,out_node_multiplier)) in 
+                    flip_matrix(layer_weights).iter().zip(layer_biases.iter().zip(layer_node_multipliers.iter())) {
+                        let out_node_multiplier = self.derivative_activation_function(previous_layer_vals.iter()
+                                                                                            .zip(out_node_back_weights.iter())
+                                                                                            .map(|(previous_activation,weight)| previous_activation*weight)
+                                                                                            .sum::<f64>() 
+                                                                                            + out_node_bias) * out_node_multiplier;
+                        layer_biases_gradient.push(out_node_multiplier);
+                        layer_weights_gradient.push(previous_layer_vals.iter().map(|in_node_activation| in_node_activation*out_node_multiplier).collect::<Vec<f64>>());
+                        temp_layer_node_multpliers.push(out_node_multiplier);
+                    }
+                }
+                biases_gradient.push(layer_biases_gradient);
+                weights_gradient.push(layer_weights_gradient);
+                let mut new_layer_node_multipliers = Vec::new();
+                for in_node in layer_weights {
+                    new_layer_node_multipliers.push(in_node.iter().zip(temp_layer_node_multpliers.iter()).map(|(weight,multiplier)| weight*multiplier).sum::<f64>());
+                }
+                layer_node_multipliers = new_layer_node_multipliers;
+            }
+            (biases_gradient,weights_gradient)
         }
 
         fn core_back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
@@ -568,6 +619,8 @@ pub mod aiz {
             (final_biases_gradient,final_weights_gradient)
         }
 
+        //these fns can and should have better granularity adjustment (or as its actually called: learning rate adjustment)
+        //right now it is basic: keep it where it is until the result is worse, if so half it
         pub fn back_propagation(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, test_data: &Vec<(Vec<f64>,Vec<f64>)>, min_granularity: f64, is_silent: bool) {
             let mut current_granularity = 1.0;
             //double testing done here, would be nice to avoid it
