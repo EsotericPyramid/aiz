@@ -578,10 +578,7 @@ pub mod aiz {
                         }
                     });
                 }
-                //to drop the original transmitter, although pretty jank
-                {
-                    original_transmitter
-                };
+                drop(original_transmitter);
 
                 for (biases_gradient,weights_gradient) in reciever {
                     for (column_bias_gradient,final_column_bias_gradient) in biases_gradient.into_iter().rev().zip(final_biases_gradient.iter_mut()) {
