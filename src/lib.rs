@@ -75,6 +75,7 @@ pub mod aiz {
         partitioned_data.push(current_partition);
         partitioned_data
     }
+
     pub struct NeuralNetwork {
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
@@ -735,6 +736,48 @@ pub mod aiz {
                     if !is_silent {
                         println!("Test: {}",new_test);
                     }
+                }
+                previous_test = new_test;
+            }
+        }
+  
+        pub fn backtracking_line_search_train(&mut self, training_data: &Vec<(Vec<f64>,Vec<f64>)>, first_checked_rate: f64, rate_degradation_factor: f64, tolerance_parameter: f64, minimum_learning_rate: f64) {
+            let partitioned_training_data = partition_data(training_data, 4.0);
+            let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+            println!("{}",previous_test);
+            let mut current_learning_rate = first_checked_rate;
+            'main_loop: loop {
+                current_learning_rate /= rate_degradation_factor;
+                let (biases_gradient,weights_gradient) = self.core_multithreaded_back_propagation(&partitioned_training_data);
+                let mut true_local_slope = 0.0;
+                for layer in biases_gradient.iter() {
+                    for bias in layer {
+                        true_local_slope += bias * (bias);
+                    }
+                }
+                for layer in weights_gradient.iter() {
+                    for node in layer {
+                        for weight in node {
+                            true_local_slope += weight * weight;
+                        }
+                    }
+                }
+                let tolerable_local_slope = tolerance_parameter * true_local_slope;
+                self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate);
+                let mut new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                println!("{}",new_test);
+                while previous_test - new_test < current_learning_rate * tolerable_local_slope {
+                    println!("Improvement: {}",previous_test-new_test);
+                    println!("Required:    {}", current_learning_rate * tolerable_local_slope);
+                    current_learning_rate *= rate_degradation_factor;
+                    println!("Looping: {}",current_learning_rate);
+                    if current_learning_rate < minimum_learning_rate {
+                        self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate / rate_degradation_factor);
+                        break 'main_loop;
+                    }
+                    self.apply_gradient(&biases_gradient, &weights_gradient, 1.0-current_learning_rate);
+                    new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                    println!("{}",new_test);
                 }
                 previous_test = new_test;
             }
