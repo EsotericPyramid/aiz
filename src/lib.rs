@@ -792,6 +792,7 @@ pub mod aiz_unstable {
     //use rand::seq::SliceRandom; //to sample random groups of examples from the data for stochastic training
     use crossbeam; //To use immuttable non-static references in threads through its scoped threads
     use std::sync::mpsc; //communicating between threads
+    use std::fs;
 
     //could be a iterator, probably
     //assumes the inner vectors are of equal length
@@ -848,6 +849,12 @@ pub mod aiz_unstable {
         partitioned_data
     }
 
+    pub fn usize_to_8_be_bytes(n: usize) -> [u8; 8] {
+        n.to_be_bytes()
+    }
+
+#[derive(PartialEq)]
+#[derive(Debug)]
     pub struct NeuralNetwork {
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
@@ -881,14 +888,160 @@ pub mod aiz_unstable {
             }
         }
 
+        //these 2 fns are untested
+        pub fn into_bytes(self) -> Vec<u8> {
+            /* turns a NeuralNetwork into the following file format:
+            All nums are as BE bytes
+
+            Offset 0: usize in 8 bytes denoting the length of the network; let this be x
+            Offset 8: usize in 8 bytes denoting the first num in nodeLayout
+            Offset 16: usize in 8 bytes denoting the second num in nodeLayout
+            ...
+            Offset 8x: usize in 8 bytes denoting the last num in nodeLayout
+
+            The follwing bytes are then all f64's of self.biases and self.weights in that order
+            they are ordered as the result of iterating through all the Vecs in them recursively
+            The exact layout of how these correspond to the actual biases and weights can be found
+            through nodelayout
+            */
+            let mut output_bytes = Vec::new();
+            for byte in usize_to_8_be_bytes(self.node_layout.len()) {
+                output_bytes.push(byte);
+            }
+            for layer in self.node_layout {
+                for byte in usize_to_8_be_bytes(layer) {
+                    output_bytes.push(byte);
+                }
+            }
+            for layer in self.biases {
+                for bias in layer {
+                    for byte in bias.to_be_bytes() {
+                        output_bytes.push(byte);
+                    }
+                }
+            }
+            for layer in self.weights {
+                for node in layer {
+                    for weight in node {
+                        for byte in weight.to_be_bytes() {
+                            output_bytes.push(byte);
+                        }
+                    }
+                }
+            }
+
+            output_bytes
+        }
+
+        pub fn from_bytes(bytes: Vec<u8>) -> Self {
+            let mut true_byte_num = 0;
+            let mut eight_byte_buffer = [0; 8];
+            let mut network_length = 0;
+            let mut node_layout = Vec::new();
+            let mut last_bias_byte_num = 0;
+            let mut biases_buffer = Vec::new();
+            let mut weights_buffer = Vec::new();
+            for byte in bytes {
+                match true_byte_num {
+                    0..=6 => {
+                        eight_byte_buffer[true_byte_num] = byte;
+                        true_byte_num += 1;
+                    }
+                    7 => {
+                        eight_byte_buffer[true_byte_num] = byte;
+                        network_length = usize::from_be_bytes(eight_byte_buffer);
+                        network_length *= 8; //JANK
+                        network_length += 7; //JANK
+                        true_byte_num += 1;
+                    }
+                    8.. if true_byte_num <= network_length => {
+                        eight_byte_buffer[true_byte_num % 8] = byte;
+                        if true_byte_num % 8 == 7 {
+                            node_layout.push(usize::from_be_bytes(eight_byte_buffer));
+                        }
+                        if true_byte_num == network_length {
+                            for layer in node_layout[1..node_layout.len()].iter() {
+                                last_bias_byte_num += layer;
+                            }
+                            last_bias_byte_num *= 8; //Jank
+                            last_bias_byte_num += network_length;
+                        }
+                        true_byte_num += 1;
+                    }
+                    8.. if (true_byte_num > network_length) && (true_byte_num <= last_bias_byte_num) => { //should still work but annoying
+                        eight_byte_buffer[true_byte_num % 8] = byte;
+                        if true_byte_num % 8 == 7 {
+                            biases_buffer.push(f64::from_be_bytes(eight_byte_buffer));
+                        }
+                        true_byte_num += 1;
+                    }
+                    8.. if (true_byte_num > network_length) && (true_byte_num > last_bias_byte_num) => {
+                        eight_byte_buffer[true_byte_num % 8] = byte;
+                        if true_byte_num % 8 == 7 {
+                            weights_buffer.push(f64::from_be_bytes(eight_byte_buffer));
+                        }
+                        true_byte_num += 1;
+                    }
+                    _ => {
+                        println!("length: {}\nlast_bias_num: {}",network_length,last_bias_byte_num);
+                        panic!("Some byte failed to match")
+                    }
+                }
+            }
+            let mut biases = Vec::new();
+            let mut layer_biases = Vec::new();
+            let mut current_layer_num = 1;
+            for num in biases_buffer {
+                layer_biases.push(num);
+                if layer_biases.len() == node_layout[current_layer_num] {
+                    biases.push(layer_biases);
+                    layer_biases = Vec::new();
+                    current_layer_num += 1;
+                }
+            }
+            let mut weights = Vec::new();
+            let mut layer_weights = Vec::new();
+            let mut node_weights = Vec::new();
+            let mut current_layer_num = 1;
+            for num in weights_buffer {
+                node_weights.push(num);
+                if node_weights.len() == node_layout[current_layer_num-1] {
+                    layer_weights.push(node_weights);
+                    node_weights = Vec::new();
+                    if layer_weights.len() == node_layout[current_layer_num] {
+                        weights.push(layer_weights);
+                        layer_weights = Vec::new();
+                        current_layer_num += 1;
+                    }
+                }
+            }
+            NeuralNetwork {
+                biases: biases,
+                weights: weights,
+                node_layout: node_layout
+            }
+        }
+
+        pub fn read_from_file(path: &std::path::Path) -> Self {
+            let raw_bytes = fs::read(path);
+            match raw_bytes {
+                Err(_) => panic!("Failed to read out the file"),
+                Ok(bytes) => Self::from_bytes(bytes)
+            }
+        }
+
+        pub fn write_to_file(self,path: &std::path::Path) -> Result<(),std::io::Error> {
+            fs::write(path,&self.into_bytes()[..])
+        }
+
         fn activation_fn(&self, x: f64) -> f64 {
-            1.0/(1.0+(-x).exp())
+            1.0/(1.0+(-x).exp()) //Sigmoid
         }
 
         //see if could be &f64 input
         fn derivative_activation_fn(&self, x: f64) -> f64 {
             let intermedite_num = self.activation_fn(x);
-            intermedite_num*(1.0-intermedite_num)
+            intermedite_num*(1.0-intermedite_num) //Sigmoid'
         }
 
         //TO DO: check the Vec::with_capacity's
@@ -1220,5 +1373,22 @@ pub mod aiz_unstable {
             }
         }
     
+    }
+
+impl Clone for NeuralNetwork {
+    fn clone(&self) -> Self {
+        NeuralNetwork { biases: self.biases.clone(), weights: self.weights.clone(), node_layout: self.node_layout.clone() }
+    }
+}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn into_and_from_bytes() {
+        let nn = aiz_unstable::NeuralNetwork::new(vec![10,5,20,16],1.0,1.0);
+        assert_eq!(nn,aiz_unstable::NeuralNetwork::from_bytes(nn.clone().into_bytes()));
     }
 }
