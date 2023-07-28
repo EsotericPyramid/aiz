@@ -766,6 +766,7 @@ pub mod aiz {
 }
 
 pub mod aiz_unstable {
+    use rand::Rng; //RNG, figure it out yourself
     use std::sync::mpsc; //communicating between threads
     use rand::seq::SliceRandom; //stochastic stuf
 
@@ -833,7 +834,7 @@ pub mod aiz_unstable {
         type SRunInfo;
 
         fn run(&self,inputs: &[f64]) -> Vec<f64>;
-        fn special_run(&self,inputs: &[f64]) -> Self::SRunInfo;
+        fn special_run(&self,inputs: &[f64]) -> Self::SRunInfo; //not sure if nescesary, esp since splice would have its own
         fn apply_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64);
         fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient;
         fn build_zero_gradient(&self) -> Self::Gradient; //gradient indicating zero movement
@@ -1189,6 +1190,193 @@ pub mod aiz_unstable {
         }
         fn call_der(x: f64) -> f64 {
             if x > 0.0 {1.0} else if x == 0.0 {0.5} else {0.0} //2nd case is technically undefined, todo: i think there is a way to do this better
+        }
+    }
+
+    pub struct MultiLayerPerceptron<T> {
+        biases: Vec<Vec<f64>>,
+        weights: Vec<Vec<Vec<f64>>>,
+        node_layout: Vec<usize>, //May be better to use lens from biases, hardly would matter though, probably
+        _activation_fn: T  //JANK AS HECK
+    }
+
+    impl<T: ActivationFn> MultiLayerPerceptron<T> {
+        pub fn new(node_layout: Vec<usize>,activation_fn: T,bias_bounds: f64,weight_bounds: f64) -> Self {
+            let mut rng = rand::thread_rng();
+            let mut biases = Vec::with_capacity(node_layout.len());
+            let mut weights = Vec::with_capacity(node_layout.len());
+            for (layer, previous_layer) in (&node_layout[1..node_layout.len()]).iter().zip((&node_layout[0..node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+                let mut layer_biases = Vec::with_capacity(*layer);
+                let mut layer_weights = Vec::with_capacity(*layer);
+                for _ in 0..*layer {
+                    layer_biases.push(2.0*bias_bounds*rng.gen::<f64>()-bias_bounds);
+                    let mut node_weights = Vec::with_capacity(*previous_layer);
+                    for _ in 0..*previous_layer {
+                        node_weights.push(2.0*weight_bounds*rng.gen::<f64>()-weight_bounds);
+                    }
+                    layer_weights.push(node_weights);
+                }
+                biases.push(layer_biases);
+                weights.push(layer_weights);
+            }
+            MultiLayerPerceptron {
+                biases: biases,
+                weights: weights,
+                node_layout: node_layout,
+                _activation_fn: activation_fn
+            }
+        }
+    }
+
+    impl<T: ActivationFn> Network for MultiLayerPerceptron<T> {
+        type Gradient = (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>);
+        type SRunInfo = (Vec<Vec<f64>>,Vec<Vec<f64>>);
+
+        fn run(&self, inputs: &[f64]) -> Vec<f64> {
+            let mut layer_activations = Vec::with_capacity(self.node_layout[1]);
+            for (node_bias,node_weights) in self.biases[0].iter().zip(self.weights[0].iter()) {
+                let mut node_val_before_activation_fn = *node_bias;
+                for (weight,previous_node_activation) in node_weights.iter().zip(inputs.iter()) {
+                    node_val_before_activation_fn += weight*previous_node_activation;
+                }
+                layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+            }
+            for (layer_biases,layer_weights) in self.biases[1..self.biases.len()].iter().zip(self.weights[1..self.weights.len()].iter()) {
+                let mut new_layer_activations = Vec::with_capacity(layer_biases.len());
+                for (node_bias,node_weights) in layer_biases.iter().zip(layer_weights.iter()) {
+                    let mut node_val_before_activation_fn = *node_bias;
+                    for (weight,previous_node_activation) in node_weights.iter().zip(layer_activations.iter()) {
+                        node_val_before_activation_fn += weight*previous_node_activation;
+                    }
+                    new_layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+                }
+                layer_activations = new_layer_activations;
+            }
+            layer_activations
+        }
+
+        fn special_run(&self,inputs: &[f64]) -> Self::SRunInfo {
+            let mut network_pre_activations = Vec::with_capacity(self.node_layout.len()-1);
+            let mut network_activations = Vec::with_capacity(self.node_layout.len());
+            network_activations.push(inputs.to_vec()); //remove this is possible
+            let mut layer_activations = Vec::with_capacity(self.node_layout[1]);
+            let mut layer_pre_activations = Vec::with_capacity(self.node_layout[1]);
+            for (node_bias,node_weights) in self.biases[0].iter().zip(self.weights[0].iter()) {
+                let mut node_val_before_activation_fn = *node_bias;
+                for (weight,previous_node_activation) in node_weights.iter().zip(inputs.iter()) {
+                    node_val_before_activation_fn += weight*previous_node_activation;
+                }
+                layer_pre_activations.push(node_val_before_activation_fn);
+                layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+            }
+            for (layer_biases,layer_weights) in self.biases[1..self.biases.len()].iter().zip(self.weights[1..self.weights.len()].iter()) {
+                let mut new_layer_activations = Vec::with_capacity(layer_biases.len());
+                let mut new_layer_pre_activations = Vec::with_capacity(layer_biases.len());
+                for (node_bias,node_weights) in layer_biases.iter().zip(layer_weights.iter()) {
+                    let mut node_val_before_activation_fn = *node_bias;
+                    for (weight,previous_node_activation) in node_weights.iter().zip(layer_activations.iter()) {
+                        node_val_before_activation_fn += weight*previous_node_activation;
+                    }
+                    new_layer_pre_activations.push(node_val_before_activation_fn);
+                    new_layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+                }
+                network_pre_activations.push(layer_pre_activations);
+                layer_pre_activations = new_layer_pre_activations;
+                network_activations.push(layer_activations);
+                layer_activations = new_layer_activations;
+            }
+            network_pre_activations.push(layer_pre_activations);
+            network_activations.push(layer_activations);
+
+            (network_activations,network_pre_activations)
+        }
+    
+        fn apply_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+            for (layer_biases,layer_biases_gradient) in self.biases.iter_mut().zip(gradient.0.iter()) {
+                for (bias, bias_gradient) in layer_biases.iter_mut().zip(layer_biases_gradient.iter()) {
+                    *bias -= bias_gradient*learning_rate;
+                }
+            }
+            for (layer_weights,layer_weights_gradient) in self.weights.iter_mut().zip(gradient.1.iter()) {
+                for (node_weights,node_weights_gradient) in layer_weights.iter_mut().zip(layer_weights_gradient.iter()) {
+                    for (weight, weight_gradient) in node_weights.iter_mut().zip(node_weights_gradient.iter()) {
+                        *weight -= weight_gradient*learning_rate
+                    }
+                }
+            }
+        }
+
+        //TO DO: Check with_capacity's
+        fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient {
+            let mut biases_gradient = Vec::with_capacity(self.node_layout.len());
+            let mut weights_gradient = Vec::with_capacity(self.node_layout.len());
+            
+            let (network_activations,network_pre_activations) = self.special_run(training_in);
+
+            //last layer specific calculations
+            let mut last_layer_biases_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-1]);
+            let mut last_layer_weights_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-1]);
+            for (pre_activation,(expected_val,real_val)) in 
+            network_pre_activations[network_pre_activations.len()-1].iter().zip(
+            training_out.iter().zip(
+            network_activations[network_activations.len()-1].iter())) {
+                let current_node_derivative = 2.0*(real_val-expected_val)*<T as ActivationFn>::call_der(*pre_activation);
+                last_layer_biases_gradient.push(current_node_derivative);
+                let mut node_weights_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-2]);
+                for previous_node_activation in network_activations[network_activations.len()-2].iter() {
+                    node_weights_gradient.push(previous_node_activation*current_node_derivative);
+                }
+                last_layer_weights_gradient.push(node_weights_gradient);
+            }
+            biases_gradient.push(last_layer_biases_gradient);
+            weights_gradient.push(last_layer_weights_gradient);
+            //All other layer calculations
+            for (forward_layer_weights,(current_pre_activations,previous_activations)) in 
+            self.weights.iter().rev().zip(
+            network_pre_activations[0..network_pre_activations.len()-1].iter().rev().zip(
+            network_activations[0..network_activations.len()-2].iter().rev())) {
+                let mut layer_biases_gradient = Vec::with_capacity(current_pre_activations.len());
+                let mut layer_weights_gradient = Vec::with_capacity(current_pre_activations.len());
+                for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).iter().zip(current_pre_activations.iter()) {
+                    let mut new_node_derivative = 0.0;
+                    for (weight,forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
+                        new_node_derivative += *weight * forward_derivative;
+                    }
+                    new_node_derivative *= <T as ActivationFn>::call_der(*node_pre_activation);
+                    layer_biases_gradient.push(new_node_derivative);
+                    let mut node_weights_gradients = Vec::with_capacity(previous_activations.len());
+                    for previous_node_activation in previous_activations {
+                        node_weights_gradients.push(previous_node_activation*new_node_derivative)
+                    }
+                    layer_weights_gradient.push(node_weights_gradients);
+                }
+                biases_gradient.push(layer_biases_gradient);
+                weights_gradient.push(layer_weights_gradient);
+            }
+            biases_gradient = biases_gradient.into_iter().rev().collect();
+            weights_gradient = weights_gradient.into_iter().rev().collect();
+
+            (biases_gradient,weights_gradient)
+        }
+    
+        fn build_zero_gradient(&self) -> Self::Gradient {
+            let mut biases = Vec::with_capacity(self.node_layout.len());
+            let mut weights = Vec::with_capacity(self.node_layout.len());
+            for (layer, previous_layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+                let mut layer_biases = Vec::with_capacity(*layer);
+                let mut layer_weights = Vec::with_capacity(*layer);
+                for _ in 0..*layer {
+                    layer_biases.push(0.0);
+                    let mut node_weights = Vec::with_capacity(*previous_layer);
+                    for _ in 0..*previous_layer {
+                        node_weights.push(0.0);
+                    }
+                    layer_weights.push(node_weights);
+                }
+                biases.push(layer_biases);
+                weights.push(layer_weights);
+            }
+            (biases,weights)
         }
     }
 }
