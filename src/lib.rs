@@ -766,7 +766,431 @@ pub mod aiz {
 }
 
 pub mod aiz_unstable {
+    use std::sync::mpsc; //communicating between threads
+    use rand::seq::SliceRandom; //stochastic stuf
+
+    //could be a iterator, probably
+    //assumes the inner vectors are of equal length
+    pub fn transpose_matrix<T>(matrix: &Vec<Vec<T>>) -> Vec<Vec<&T>> {
+        let inner_matrix_len = matrix[0].len();
+        let mut output = Vec::with_capacity(inner_matrix_len);
+        for index in 0..inner_matrix_len {
+            let mut output_column = Vec::with_capacity(matrix.len());
+            for column in matrix {
+                output_column.push(&column[index]);
+            }
+            output.push(output_column);
+        }
+        output
+    }
+
+    //same as above
+    pub fn transpose_owned_matrix<T>(matrix: Vec<Vec<T>>) -> Vec<Vec<T>> {
+        let inner_matrix_len = matrix[0].len();
+        let mut output_vec: Vec<Vec<T>> = Vec::with_capacity(inner_matrix_len);
+        for _ in 0..inner_matrix_len {
+            output_vec.push(Vec::with_capacity(matrix.len()))
+        }
+        for vec in matrix {
+            for (val, current_output_vec) in vec.into_iter().zip(output_vec.iter_mut()) {
+                current_output_vec.push(val)
+            }
+        }
+        output_vec
+    }
+
+    //no randomness is implemented in this partitioning
+    //this is because it is only intended to split up work
+    //for multithreaded training and testing, so no randomness needed
+    //Also: num_partitions is f64 for optimization reasons, 
+    //in theory you could use that fact on purpose for cores with dif speeds
+    //but it isnt for that
+    pub fn partition_data<T>(data: &Vec<T>,num_partitions: f64) -> Vec<Vec<&T>> {
+        let exact_partition_size = data.len() as f64 / num_partitions;
+        let mut partitioned_data = Vec::new();
+        let mut current_partition = Vec::new();
+        let mut current_partition_point = exact_partition_size;
+        for (example_num,example) in data.iter().enumerate() {
+            if (example_num as f64) < current_partition_point {
+                current_partition.push(example);
+            } else {
+                current_partition_point += exact_partition_size;
+                partitioned_data.push(current_partition);
+                current_partition = Vec::new();
+                current_partition.push(example);
+            }
+        }
+        partitioned_data.push(current_partition);
+        partitioned_data
+    }
+
+    pub fn usize_to_8_be_bytes(n: usize) -> [u8; 8] {
+        n.to_be_bytes()
+    }
+
+    pub trait Network: Send + Sync {
+        type Gradient: Gradient;
+        type SRunInfo;
+
+        fn run(&self,inputs: &[f64]) -> Vec<f64>;
+        fn special_run(&self,inputs: &[f64]) -> Self::SRunInfo;
+        fn apply_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64);
+        fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient;
+        fn build_zero_gradient(&self) -> Self::Gradient; //gradient indicating zero movement
+    }
+
+    pub trait Gradient: Send + Sync {
+        fn add(&mut self,other: Self);
+        fn div(&mut self,divisor: f64);
+        fn dot_product(&self,other: &Self) -> f64;
+    }
+
+    impl Gradient for (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) { //MLP    
+        fn add(&mut self,other: (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>)) {
+            for (self_biases_layer,other_biases_layer) in self.0.iter_mut().zip(other.0.into_iter()) {
+                for (self_bias,other_bias) in self_biases_layer.iter_mut().zip(other_biases_layer.into_iter()) {
+                    *self_bias += other_bias;
+                }
+            }
+            for (self_weights_layer,other_weights_layer) in self.1.iter_mut().zip(other.1.into_iter()) {
+                for (self_weights_node,other_weights_node) in self_weights_layer.iter_mut().zip(other_weights_layer.into_iter()) {
+                    for (self_weight, other_weight) in self_weights_node.iter_mut().zip(other_weights_node.into_iter()) {
+                        *self_weight += other_weight
+                    }
+                }
+            }
+        }
+        fn div(&mut self,divisor: f64) {
+            for biases_layer in &mut self.0 {
+                for bias in biases_layer {
+                    *bias /= divisor;
+                }
+            }
+            for weights_layer in &mut self.1 {
+                for weights_node in weights_layer {
+                    for weight in weights_node {
+                        *weight /= divisor;
+                    }
+                }
+            }
+        }
+        fn dot_product(&self,other: &Self) -> f64 {
+            let mut output = 0.0;
+            for (self_layer,other_layer) in self.0.iter().zip(other.0.iter()) {
+                for (self_bias,other_bias) in self_layer.iter().zip(other_layer.iter()) {
+                    output += self_bias * other_bias;
+                }
+            }
+            for (self_layer,other_layer) in self.1.iter().zip(other.1.iter()) {
+                for (self_node,other_node) in self_layer.iter().zip(other_layer.iter()) {
+                    for (self_weight,other_weight) in self_node.iter().zip(other_node.iter()) {
+                        output += self_weight * other_weight;
+                    }
+                }
+            }
+            output
+        }
+    }
+
+    pub trait NetworkInherentMethods: Network {
+        fn test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64;
+        fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64;
+        fn multithreaded_test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>,num_partitions: f64) -> f64;
+        fn back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> Self::Gradient;
+        fn multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> Self::Gradient;
+        fn stochastic_multithreaded_back_propagation(&self,training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>,batch_size: usize) -> Self::Gradient;
+        fn backtracking_line_search_train(
+            &mut self, 
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>, 
+            first_checked_rate: f64, 
+            rate_degradation_factor: f64, 
+            tolerance_parameter: f64, 
+            minimum_learning_rate: f64, 
+            max_iterations: u32
+        );
+        fn multithreaded_backtracking_line_search_train(
+            &mut self, 
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>, 
+            num_partitions: f64,
+            first_checked_rate: f64, 
+            rate_degradation_factor: f64, 
+            tolerance_parameter: f64, 
+            minimum_learning_rate: f64, 
+            max_iterations: u32
+        );
+        fn stochastic_multithreaded_backtracking_line_search_train(
+            &mut self, 
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>, 
+            num_partitions: f64,
+            batch_size: usize,
+            first_checked_rate: f64, 
+            rate_degradation_factor: f64, 
+            tolerance_parameter: f64, 
+            minimum_learning_rate: f64, 
+            max_iterations: u32
+        );
+    }
+
+    impl<T: Network> NetworkInherentMethods for T {
+        fn test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64 {
+            let mut output = 0.0;
+            for (test_in,test_expected_out) in test_data {
+                for (single_real_out,single_expected_out) in self.run(test_in).iter().zip(test_expected_out.iter()) {
+                    let dif = single_real_out - single_expected_out;
+                    output += dif*dif;
+                }
+            }
+            output / test_data.len() as f64
+        }
     
+        fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64 {
+            let mut output = 0.0;
+            crossbeam::scope(|scope| {
+                let (original_transmitter,receiver) = mpsc::channel();
+                for partition in partitioned_test_data {
+                    let cloned_transmitter = original_transmitter.clone();
+                    scope.spawn(move |_| {
+                        for (test_in,test_expected_out) in partition {
+                            for (single_real_out,single_expected_out) in self.run(test_in).iter().zip(test_expected_out.iter()) {
+                                let dif = single_real_out - single_expected_out;
+                                cloned_transmitter.send(dif*dif).unwrap();
+                            }
+                        }
+                    });
+                }
+                drop(original_transmitter);
+                for single_example_loss in receiver {
+                    output += single_example_loss;
+                }
+            }).unwrap();
+            let mut length = 0;
+            for partition in partitioned_test_data {
+                length += partition.len();
+            }
+            output / length as f64
+        }
+
+        fn multithreaded_test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>,num_partitions: f64) -> f64 {
+            self.prepartitioned_multithreaded_test(&partition_data(test_data,num_partitions))
+        }
+
+        fn back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> Self::Gradient {
+            let mut output_gradient = self.build_zero_gradient();
+            for (training_in,training_out) in training_data {
+                let current_gradient = self.one_example_back_propagation(training_in, training_out);
+                output_gradient.add(current_gradient);
+            }
+            output_gradient.div(training_data.len() as f64);
+            output_gradient
+        }
+
+        fn multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> Self::Gradient {
+            let mut output_gradient = self.build_zero_gradient();
+            crossbeam::scope(|scope| {
+                let (original_transmitter,receiver) = mpsc::channel();
+                for partition in partitioned_training_data {
+                    let cloned_transmitter = original_transmitter.clone();
+                    scope.spawn(move |_| {
+                        for (training_in,training_out) in partition {
+                            let gradient_pair = self.one_example_back_propagation(training_in, training_out);
+                            cloned_transmitter.send(gradient_pair).unwrap();
+                        }
+                    });
+                }
+                drop(original_transmitter);
+                for gradient in receiver {
+                    output_gradient.add(gradient)
+                }
+            }).unwrap();
+            let mut data_length = 0;
+            for partition in partitioned_training_data {
+                data_length += partition.len()
+            }
+            output_gradient.div(data_length as f64);
+            output_gradient
+        }
+
+        fn stochastic_multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>,batch_size: usize) -> Self::Gradient {
+            let mut output_gradient = self.build_zero_gradient();
+            crossbeam::scope(|scope| {
+                let (original_transmitter,receiver) = mpsc::channel();
+                for partition in partitioned_training_data {
+                    let cloned_transmitter = original_transmitter.clone();
+                    scope.spawn(move |_| {
+                        let mut rng = rand::thread_rng();
+                        for (training_in,training_out) in partition.choose_multiple(&mut rng, batch_size) {
+                            let gradient_pair = self.one_example_back_propagation(training_in, training_out);
+                            cloned_transmitter.send(gradient_pair).unwrap();
+                        }
+                    });
+                }
+                drop(original_transmitter);
+                for gradient in receiver {
+                    output_gradient.add(gradient)
+                }
+            }).unwrap();
+            let mut data_length = 0;
+            for partition in partitioned_training_data {
+                data_length += partition.len()
+            }
+            output_gradient.div(data_length as f64);
+            output_gradient
+        }
+    
+        fn backtracking_line_search_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            first_checked_rate: f64,
+            rate_degradation_factor: f64,
+            tolerance_parameter: f64,
+            minimum_learning_rate: f64,
+            max_iterations: u32
+        ) {
+            let mut previous_test = self.test(training_data);
+            println!("{}",previous_test);
+            let mut current_learning_rate = first_checked_rate * rate_degradation_factor;
+            let mut iteration_num = 0;
+            'main_loop: while iteration_num < max_iterations {
+                current_learning_rate /= rate_degradation_factor;
+                let gradient = self.back_propagation(training_data);
+                let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
+                self.apply_gradient(&gradient,current_learning_rate);
+                let mut new_test = self.test(training_data);
+                println!("{}",new_test);
+                while previous_test - new_test < current_learning_rate * tolerable_local_slope {
+                    println!("Improvement: {}",previous_test-new_test);
+                    println!("Required:    {}", current_learning_rate * tolerable_local_slope);
+                    current_learning_rate *= rate_degradation_factor;
+                    println!("Looping: {}",current_learning_rate);
+                    if current_learning_rate < minimum_learning_rate {
+                        self.apply_gradient(&gradient, current_learning_rate / rate_degradation_factor);
+                        break 'main_loop;
+                    }
+                    self.apply_gradient(&gradient, 1.0-current_learning_rate);
+                    new_test = self.test(training_data);
+                    println!("{}",new_test);
+                }
+                previous_test = new_test;
+                iteration_num += 1;
+            }
+        }
+
+        fn multithreaded_backtracking_line_search_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            num_partitions: f64,
+            first_checked_rate: f64,
+            rate_degradation_factor: f64,
+            tolerance_parameter: f64,
+            minimum_learning_rate: f64,
+            max_iterations: u32
+        ) {
+            let partitioned_training_data = partition_data(training_data, num_partitions);
+            let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+            println!("{}",previous_test);
+            let mut current_learning_rate = first_checked_rate * rate_degradation_factor;
+            let mut iteration_num = 0;
+            'main_loop: while iteration_num < max_iterations {
+                current_learning_rate /= rate_degradation_factor;
+                let gradient = self.multithreaded_back_propagation(&partitioned_training_data);
+                let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
+                self.apply_gradient(&gradient,current_learning_rate);
+                let mut new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                println!("{}",new_test);
+                while previous_test - new_test < current_learning_rate * tolerable_local_slope {
+                    println!("Improvement: {}",previous_test-new_test);
+                    println!("Required:    {}", current_learning_rate * tolerable_local_slope);
+                    current_learning_rate *= rate_degradation_factor;
+                    println!("Looping: {}",current_learning_rate);
+                    if current_learning_rate < minimum_learning_rate {
+                        self.apply_gradient(&gradient, current_learning_rate / rate_degradation_factor);
+                        break 'main_loop;
+                    }
+                    self.apply_gradient(&gradient, 1.0-current_learning_rate);
+                    new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                    println!("{}",new_test);
+                }
+                previous_test = new_test;
+                iteration_num += 1;
+            }
+        }
+    
+        fn stochastic_multithreaded_backtracking_line_search_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            num_partitions: f64,
+            batch_size: usize,
+            first_checked_rate: f64,
+            rate_degradation_factor: f64,
+            tolerance_parameter: f64,
+            minimum_learning_rate: f64,
+            max_iterations: u32
+        ) {
+            let partitioned_training_data = partition_data(training_data, num_partitions);
+            let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+            println!("{}",previous_test);
+            let mut current_learning_rate = first_checked_rate * rate_degradation_factor;
+            let mut iteration_num = 0;
+            'main_loop: while iteration_num < max_iterations {
+                current_learning_rate /= rate_degradation_factor;
+                let gradient = self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size);
+                let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
+                self.apply_gradient(&gradient,current_learning_rate);
+                let mut new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                println!("{}",new_test);
+                while previous_test - new_test < current_learning_rate * tolerable_local_slope {
+                    println!("Improvement: {}",previous_test-new_test);
+                    println!("Required:    {}", current_learning_rate * tolerable_local_slope);
+                    current_learning_rate *= rate_degradation_factor;
+                    println!("Looping: {}",current_learning_rate);
+                    if current_learning_rate < minimum_learning_rate {
+                        self.apply_gradient(&gradient, current_learning_rate / rate_degradation_factor);
+                        break 'main_loop;
+                    }
+                    self.apply_gradient(&gradient, 1.0-current_learning_rate);
+                    new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                    println!("{}",new_test);
+                }
+                previous_test = new_test;
+                iteration_num += 1;
+            }
+        }
+    }
+
+    pub trait ActivationFn: Send + Sync {
+        fn call(x: f64) -> f64;
+        fn call_der(x: f64) -> f64;
+    }
+
+    pub struct Sigmoid;
+    pub struct Linear;
+    pub struct Relu;
+
+    impl ActivationFn for Sigmoid {
+        fn call(x: f64) -> f64 {
+            1.0/(1.0+(-x).exp2())
+        }
+        fn call_der(x: f64) -> f64 {
+            let temp_val = 1.0/(1.0+(-x).exp2());
+            temp_val*(1.0-temp_val)
+        }
+    }
+    impl ActivationFn for Linear {
+        fn call(x: f64) -> f64 {
+            x
+        }
+        fn call_der(_: f64) -> f64 {
+            1.0
+        }
+    }
+    impl ActivationFn for Relu {
+        fn call(x: f64) -> f64 {
+            if x > 0.0 {x} else {0.0}
+        }
+        fn call_der(x: f64) -> f64 {
+            if x > 0.0 {1.0} else if x == 0.0 {0.5} else {0.0} //2nd case is technically undefined, todo: i think there is a way to do this better
+        }
+    }
 }
 
 #[cfg(test)]
