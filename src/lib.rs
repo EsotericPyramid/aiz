@@ -766,7 +766,7 @@ pub mod aiz {
 }
 
 pub mod aiz_unstable {
-    use rand::Rng; use core::panic;
+    use rand::Rng; 
     //RNG, figure it out yourself
     use std::sync::mpsc; //communicating between threads
     use rand::seq::SliceRandom; //stochastic stuf
@@ -1166,50 +1166,54 @@ pub mod aiz_unstable {
         }
     }
 
-    pub trait ActivationFn: Send + Sync {
-        fn call(x: f64) -> f64;
-        fn call_der(x: f64) -> f64;
-    }
-
-    pub struct Sigmoid;
-    pub struct Linear;
-    pub struct Relu;
-
-    impl ActivationFn for Sigmoid {
-        fn call(x: f64) -> f64 {
-            1.0/(1.0+(-x).exp2())
+    pub mod activation_fn_backend {
+        pub fn sigmoid_call(x: f64) -> f64 {
+            1.0/(1.0+(-x).exp())
         }
-        fn call_der(x: f64) -> f64 {
-            let temp_val = 1.0/(1.0+(-x).exp2());
-            temp_val*(1.0-temp_val)
+        pub fn sigmoid_call_der(x: f64) -> f64 {
+            let temp_val = 1.0/(1.0+(-x).exp());
+            temp_val*(1.0*temp_val)
         }
-    }
-    impl ActivationFn for Linear {
-        fn call(x: f64) -> f64 {
+    
+        pub fn linear_call(x: f64) -> f64 {
             x
         }
-        fn call_der(_: f64) -> f64 {
+        pub fn linear_call_der(_: f64) -> f64 {
             1.0
         }
-    }
-    impl ActivationFn for Relu {
-        fn call(x: f64) -> f64 {
-            if x > 0.0 {x} else {0.0}
+
+        pub fn relu_call(x: f64) -> f64 {
+            if x > 0.0 {
+                x
+            } else {
+                0.0
+            }
         }
-        fn call_der(x: f64) -> f64 {
-            if x > 0.0 {1.0} else if x == 0.0 {0.5} else {0.0} //2nd case is technically undefined, todo: i think there is a way to do this better
+        pub fn relu_call_der(x: f64) -> f64 {
+            if x > 0.0 {
+                1.0
+            } else if x == 0.0{
+                0.5 //really undefined
+            } else {
+                0.0
+            }
         }
     }
 
-    pub struct MultiLayerPerceptron<T: ActivationFn> {
+    pub const SIGMOID: (fn(f64) -> f64,fn(f64) -> f64) = (activation_fn_backend::sigmoid_call,activation_fn_backend::sigmoid_call_der);
+    pub const LINEAR: (fn(f64) -> f64,fn(f64) -> f64) = (activation_fn_backend::linear_call,activation_fn_backend::linear_call_der);
+    pub const RELU: (fn(f64) -> f64,fn(f64) -> f64) =  (activation_fn_backend::relu_call,activation_fn_backend::relu_call_der);
+    
+    pub struct MultiLayerPerceptron {
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
         node_layout: Vec<usize>, //May be better to use lens from biases, hardly would matter though, probably
-        _activation_fn: T  //JANK AS HECK
+        activation_fn: fn(f64) -> f64,
+        derivative_activation_fn: fn(f64) -> f64
     }
 
-    impl<T: ActivationFn> FileSupport for MultiLayerPerceptron<T> {
-        type ExtraDecodingInfo = T;
+    impl FileSupport for MultiLayerPerceptron {
+        type ExtraDecodingInfo = (fn(f64) -> f64, fn(f64) -> f64);
 
         fn to_bytes(self) -> Vec<u8> {
             /* turns a NeuralNetwork into the following file format:
@@ -1254,7 +1258,7 @@ pub mod aiz_unstable {
             }
             output_bytes
         }
-        fn from_bytes(bytes: Vec<u8>,activation_fn: T) -> Self {
+        fn from_bytes(bytes: Vec<u8>,activation_fn: Self::ExtraDecodingInfo) -> Self {
             let mut true_byte_num = 0;
             let mut eight_byte_buffer = [0; 8];
             let mut network_length = 0;
@@ -1340,13 +1344,14 @@ pub mod aiz_unstable {
                 biases: biases,
                 weights: weights,
                 node_layout: node_layout,
-                _activation_fn: activation_fn
+                activation_fn: activation_fn.0,
+                derivative_activation_fn: activation_fn.1
             }
         }
     }
 
-    impl<T: ActivationFn> MultiLayerPerceptron<T> {
-        pub fn new(node_layout: Vec<usize>,activation_fn: T,bias_bounds: f64,weight_bounds: f64) -> Self {
+    impl MultiLayerPerceptron {
+        pub fn new(node_layout: Vec<usize>,activation_fn: (fn(f64) -> f64,fn(f64) -> f64),bias_bounds: f64,weight_bounds: f64) -> Self {
             let mut rng = rand::thread_rng();
             let mut biases = Vec::with_capacity(node_layout.len());
             let mut weights = Vec::with_capacity(node_layout.len());
@@ -1368,12 +1373,13 @@ pub mod aiz_unstable {
                 biases: biases,
                 weights: weights,
                 node_layout: node_layout,
-                _activation_fn: activation_fn
+                activation_fn: activation_fn.0,
+                derivative_activation_fn: activation_fn.1
             }
         }
     }
 
-    impl<T: ActivationFn> Network for MultiLayerPerceptron<T> {
+    impl Network for MultiLayerPerceptron {
         type Gradient = (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>);
         type SRunInfo = (Vec<Vec<f64>>,Vec<Vec<f64>>);
 
@@ -1384,7 +1390,7 @@ pub mod aiz_unstable {
                 for (weight,previous_node_activation) in node_weights.iter().zip(inputs.iter()) {
                     node_val_before_activation_fn += weight*previous_node_activation;
                 }
-                layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+                layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
             }
             for (layer_biases,layer_weights) in self.biases[1..self.biases.len()].iter().zip(self.weights[1..self.weights.len()].iter()) {
                 let mut new_layer_activations = Vec::with_capacity(layer_biases.len());
@@ -1393,7 +1399,7 @@ pub mod aiz_unstable {
                     for (weight,previous_node_activation) in node_weights.iter().zip(layer_activations.iter()) {
                         node_val_before_activation_fn += weight*previous_node_activation;
                     }
-                    new_layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+                    new_layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
                 }
                 layer_activations = new_layer_activations;
             }
@@ -1412,7 +1418,7 @@ pub mod aiz_unstable {
                     node_val_before_activation_fn += weight*previous_node_activation;
                 }
                 layer_pre_activations.push(node_val_before_activation_fn);
-                layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+                layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
             }
             for (layer_biases,layer_weights) in self.biases[1..self.biases.len()].iter().zip(self.weights[1..self.weights.len()].iter()) {
                 let mut new_layer_activations = Vec::with_capacity(layer_biases.len());
@@ -1423,7 +1429,7 @@ pub mod aiz_unstable {
                         node_val_before_activation_fn += weight*previous_node_activation;
                     }
                     new_layer_pre_activations.push(node_val_before_activation_fn);
-                    new_layer_activations.push(<T as ActivationFn>::call(node_val_before_activation_fn));
+                    new_layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
                 }
                 network_pre_activations.push(layer_pre_activations);
                 layer_pre_activations = new_layer_pre_activations;
@@ -1465,7 +1471,7 @@ pub mod aiz_unstable {
             network_pre_activations[network_pre_activations.len()-1].iter().zip(
             training_out.iter().zip(
             network_activations[network_activations.len()-1].iter())) {
-                let current_node_derivative = 2.0*(real_val-expected_val)*<T as ActivationFn>::call_der(*pre_activation);
+                let current_node_derivative = 2.0*(real_val-expected_val)*(self.derivative_activation_fn)(*pre_activation);
                 last_layer_biases_gradient.push(current_node_derivative);
                 let mut node_weights_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-2]);
                 for previous_node_activation in network_activations[network_activations.len()-2].iter() {
@@ -1487,7 +1493,7 @@ pub mod aiz_unstable {
                     for (weight,forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
                         new_node_derivative += *weight * forward_derivative;
                     }
-                    new_node_derivative *= <T as ActivationFn>::call_der(*node_pre_activation);
+                    new_node_derivative *= (self.derivative_activation_fn)(*node_pre_activation);
                     layer_biases_gradient.push(new_node_derivative);
                     let mut node_weights_gradients = Vec::with_capacity(previous_activations.len());
                     for previous_node_activation in previous_activations {
