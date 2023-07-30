@@ -1166,6 +1166,8 @@ pub mod aiz_unstable {
         }
     }
 
+    pub struct ActivationFn(pub fn(f64) -> f64,pub fn(f64) -> f64);
+
     pub mod activation_fn_backend {
         pub fn sigmoid_call(x: f64) -> f64 {
             1.0/(1.0+(-x).exp())
@@ -1200,10 +1202,10 @@ pub mod aiz_unstable {
         }
     }
 
-    pub const SIGMOID: (fn(f64) -> f64,fn(f64) -> f64) = (activation_fn_backend::sigmoid_call,activation_fn_backend::sigmoid_call_der);
-    pub const LINEAR: (fn(f64) -> f64,fn(f64) -> f64) = (activation_fn_backend::linear_call,activation_fn_backend::linear_call_der);
-    pub const RELU: (fn(f64) -> f64,fn(f64) -> f64) =  (activation_fn_backend::relu_call,activation_fn_backend::relu_call_der);
-    
+    pub const SIGMOID: ActivationFn = ActivationFn(activation_fn_backend::sigmoid_call,activation_fn_backend::sigmoid_call_der);
+    pub const LINEAR: ActivationFn = ActivationFn(activation_fn_backend::linear_call,activation_fn_backend::linear_call_der);
+    pub const RELU: ActivationFn =  ActivationFn(activation_fn_backend::relu_call,activation_fn_backend::relu_call_der);
+
     pub struct MultiLayerPerceptron {
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
@@ -1213,7 +1215,7 @@ pub mod aiz_unstable {
     }
 
     impl FileSupport for MultiLayerPerceptron {
-        type ExtraDecodingInfo = (fn(f64) -> f64, fn(f64) -> f64);
+        type ExtraDecodingInfo = ActivationFn;
 
         fn to_bytes(self) -> Vec<u8> {
             /* turns a NeuralNetwork into the following file format:
@@ -1351,7 +1353,7 @@ pub mod aiz_unstable {
     }
 
     impl MultiLayerPerceptron {
-        pub fn new(node_layout: Vec<usize>,activation_fn: (fn(f64) -> f64,fn(f64) -> f64),bias_bounds: f64,weight_bounds: f64) -> Self {
+        pub fn new(node_layout: Vec<usize>,activation_fn: ActivationFn,bias_bounds: f64,weight_bounds: f64) -> Self {
             let mut rng = rand::thread_rng();
             let mut biases = Vec::with_capacity(node_layout.len());
             let mut weights = Vec::with_capacity(node_layout.len());
