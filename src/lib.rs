@@ -854,7 +854,7 @@ pub mod aiz_unstable {
         fn dot_product(&self,other: &Self) -> f64;
     }
 
-    impl Gradient for (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) { //MLP    
+    impl Gradient for (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) { //MLP  
         fn add(&mut self,other: (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>)) {
             for (self_biases_layer,other_biases_layer) in self.0.iter_mut().zip(other.0.into_iter()) {
                 for (self_bias,other_bias) in self_biases_layer.iter_mut().zip(other_biases_layer.into_iter()) {
@@ -1530,6 +1530,19 @@ pub mod aiz_unstable {
                 weights.push(layer_weights);
             }
             (biases,weights)
+        }
+    }
+
+    mod splice {
+        use super::*;
+
+        pub trait SpliceableNetwork: Network {
+            type SSRunAddInfo;
+
+            fn s_special_run(&self,inputs: &[f64]) -> Self::SSRunAddInfo;
+            fn der_run(&self,output_node_ders: &[f64],add_info: Self::SSRunAddInfo) -> Self::Gradient;
+            fn get_num_inputs(&self) -> usize;
+            fn get_num_outputs(&self) -> usize; //solely to validate if it is a valid spliced network
         }
     }
 }
