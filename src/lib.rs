@@ -638,7 +638,7 @@ pub mod aiz {
                         self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate / rate_degradation_factor);
                         break 'main_loop;
                     }
-                    self.apply_gradient(&biases_gradient, &weights_gradient, 1.0-current_learning_rate);
+                    self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
                     new_test = self.test(training_data);
                     println!("{}",new_test);
                 }
@@ -692,7 +692,7 @@ pub mod aiz {
                         self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate / rate_degradation_factor);
                         break 'main_loop;
                     }
-                    self.apply_gradient(&biases_gradient, &weights_gradient, 1.0-current_learning_rate);
+                    self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
                     new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
                     println!("{}",new_test);
                 }
@@ -747,7 +747,7 @@ pub mod aiz {
                         self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate / rate_degradation_factor);
                         break 'main_loop;
                     }
-                    self.apply_gradient(&biases_gradient, &weights_gradient, 1.0-current_learning_rate);
+                    self.apply_gradient(&biases_gradient, &weights_gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
                     new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
                     println!("{}",new_test);
                 }
@@ -833,19 +833,18 @@ pub mod aiz_unstable {
     pub trait FileSupport {
         type ExtraDecodingInfo;
         //is in be bytes
-        fn to_bytes(self) -> Vec<u8>;
+        fn into_bytes(self) -> Vec<u8>;
         fn from_bytes(bytes: Vec<u8>,decoding_info: Self::ExtraDecodingInfo) -> Self;
     }
 
     pub trait Network: Send + Sync {
         type Gradient: Gradient;
-        type SRunInfo;
 
         fn run(&self,inputs: &[f64]) -> Vec<f64>;
-        fn special_run(&self,inputs: &[f64]) -> Self::SRunInfo; //not sure if nescesary, esp since splice would have its own
-        fn apply_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64);
-        fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient;
+        fn subtract_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64);
+        fn add_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64);
         fn build_zero_gradient(&self) -> Self::Gradient; //gradient indicating zero movement
+        fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient;
     }
 
     pub trait Gradient: Send + Sync {
@@ -1063,7 +1062,7 @@ pub mod aiz_unstable {
                 current_learning_rate /= rate_degradation_factor;
                 let gradient = self.back_propagation(training_data);
                 let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
-                self.apply_gradient(&gradient,current_learning_rate);
+                self.subtract_gradient(&gradient,current_learning_rate);
                 let mut new_test = self.test(training_data);
                 println!("{}",new_test);
                 while previous_test - new_test < current_learning_rate * tolerable_local_slope {
@@ -1072,10 +1071,10 @@ pub mod aiz_unstable {
                     current_learning_rate *= rate_degradation_factor;
                     println!("Looping: {}",current_learning_rate);
                     if current_learning_rate < minimum_learning_rate {
-                        self.apply_gradient(&gradient, current_learning_rate / rate_degradation_factor);
+                        self.subtract_gradient(&gradient, current_learning_rate / rate_degradation_factor);
                         break 'main_loop;
                     }
-                    self.apply_gradient(&gradient, 1.0-current_learning_rate);
+                    self.subtract_gradient(&gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
                     new_test = self.test(training_data);
                     println!("{}",new_test);
                 }
@@ -1103,7 +1102,7 @@ pub mod aiz_unstable {
                 current_learning_rate /= rate_degradation_factor;
                 let gradient = self.multithreaded_back_propagation(&partitioned_training_data);
                 let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
-                self.apply_gradient(&gradient,current_learning_rate);
+                self.subtract_gradient(&gradient,current_learning_rate);
                 let mut new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
                 println!("{}",new_test);
                 while previous_test - new_test < current_learning_rate * tolerable_local_slope {
@@ -1112,10 +1111,10 @@ pub mod aiz_unstable {
                     current_learning_rate *= rate_degradation_factor;
                     println!("Looping: {}",current_learning_rate);
                     if current_learning_rate < minimum_learning_rate {
-                        self.apply_gradient(&gradient, current_learning_rate / rate_degradation_factor);
+                        self.subtract_gradient(&gradient, current_learning_rate / rate_degradation_factor);
                         break 'main_loop;
                     }
-                    self.apply_gradient(&gradient, 1.0-current_learning_rate);
+                    self.subtract_gradient(&gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
                     new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
                     println!("{}",new_test);
                 }
@@ -1144,7 +1143,7 @@ pub mod aiz_unstable {
                 current_learning_rate /= rate_degradation_factor;
                 let gradient = self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size);
                 let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
-                self.apply_gradient(&gradient,current_learning_rate);
+                self.subtract_gradient(&gradient,current_learning_rate);
                 let mut new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
                 println!("{}",new_test);
                 while previous_test - new_test < current_learning_rate * tolerable_local_slope {
@@ -1153,10 +1152,10 @@ pub mod aiz_unstable {
                     current_learning_rate *= rate_degradation_factor;
                     println!("Looping: {}",current_learning_rate);
                     if current_learning_rate < minimum_learning_rate {
-                        self.apply_gradient(&gradient, current_learning_rate / rate_degradation_factor);
+                        self.subtract_gradient(&gradient, current_learning_rate / rate_degradation_factor);
                         break 'main_loop;
                     }
-                    self.apply_gradient(&gradient, 1.0-current_learning_rate);
+                    self.subtract_gradient(&gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
                     new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
                     println!("{}",new_test);
                 }
@@ -1164,6 +1163,14 @@ pub mod aiz_unstable {
                 iteration_num += 1;
             }
         }
+    }
+
+    pub trait FlattenableGradient: Network {
+        fn flatten_gradient(gradient: Self::Gradient) -> Vec<f64>;
+        fn subtract_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64);
+        fn add_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64);
+        fn build_zero_flat_gradient(&self) -> Vec<f64>;
+        fn get_num_params(&self) -> usize;
     }
 
     pub struct ActivationFn(pub fn(f64) -> f64,pub fn(f64) -> f64);
@@ -1200,11 +1207,58 @@ pub mod aiz_unstable {
                 0.0
             }
         }
+    
+        pub fn binary_step_call(x: f64) -> f64 {
+            if x > 0.0 {1.0} else {0.0}
+        }
+        pub fn binary_step_call_der(_: f64) -> f64 {
+            0.0
+        }
+
+        pub fn tanh_call(x: f64) -> f64 {
+            let e_to_x = x.exp();
+            let e_to_neg_x = 1.0/(e_to_x);
+            (e_to_x-e_to_neg_x)/(e_to_x+e_to_neg_x)
+        }
+        pub fn tanh_call_der(x: f64) -> f64 {
+            1.0 - tanh_call(x)
+        }
+
+        pub fn leaky_relu_call(x: f64) -> f64 {
+            if x > 0.0 {x} else {0.01*x}
+        }
+        pub fn leaky_relu_call_der(x: f64) -> f64 {
+            if x > 0.0 {1.0} else if x == 0.0 {0.505} else {0.01} //2nd is technically undefined
+        }
+    
+        pub fn silu_call(x: f64) -> f64 {
+            x/(1.0+(-x).exp())
+        }
+        pub fn silu_call_der(x: f64) -> f64 {
+            let e_to_neg_x = (-x).exp();
+            let one_plus_e_to_neg_x = 1.0+e_to_neg_x;
+            (one_plus_e_to_neg_x+x*e_to_neg_x)/(one_plus_e_to_neg_x*one_plus_e_to_neg_x)
+        }
+
+        pub fn gaussian_call(x: f64) -> f64 {
+            (-x*x).exp()
+        }
+        pub fn gaussian_call_der(x: f64) -> f64 {
+            -2.0 * x * gaussian_call(x)
+        }
     }
 
     pub const SIGMOID: ActivationFn = ActivationFn(activation_fn_backend::sigmoid_call,activation_fn_backend::sigmoid_call_der);
     pub const LINEAR: ActivationFn = ActivationFn(activation_fn_backend::linear_call,activation_fn_backend::linear_call_der);
     pub const RELU: ActivationFn =  ActivationFn(activation_fn_backend::relu_call,activation_fn_backend::relu_call_der);
+    pub const BINARY_STEP: ActivationFn = ActivationFn(activation_fn_backend::binary_step_call,activation_fn_backend::binary_step_call_der);
+    pub const TANH: ActivationFn = ActivationFn(activation_fn_backend::tanh_call,activation_fn_backend::tanh_call_der);
+    pub const LEAKY_RELU: ActivationFn = ActivationFn(activation_fn_backend::leaky_relu_call,activation_fn_backend::leaky_relu_call_der);
+    pub const SILU: ActivationFn = ActivationFn(activation_fn_backend::silu_call,activation_fn_backend::silu_call_der);
+    pub const GAUSSIAN: ActivationFn = ActivationFn(activation_fn_backend::gaussian_call,activation_fn_backend::gaussian_call_der);
+    //pub const : ActivationFn = ActivationFn(activation_fn_backend::_call,activation_fn_backend::_call_der);
+
+    //here be actual structs
 
     pub struct MultiLayerPerceptron {
         biases: Vec<Vec<f64>>,
@@ -1217,7 +1271,7 @@ pub mod aiz_unstable {
     impl FileSupport for MultiLayerPerceptron {
         type ExtraDecodingInfo = ActivationFn;
 
-        fn to_bytes(self) -> Vec<u8> {
+        fn into_bytes(self) -> Vec<u8> {
             /* turns a NeuralNetwork into the following file format:
             All nums are as BE bytes
 
@@ -1383,7 +1437,6 @@ pub mod aiz_unstable {
 
     impl Network for MultiLayerPerceptron {
         type Gradient = (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>);
-        type SRunInfo = (Vec<Vec<f64>>,Vec<Vec<f64>>);
 
         fn run(&self, inputs: &[f64]) -> Vec<f64> {
             let mut layer_activations = Vec::with_capacity(self.node_layout[1]);
@@ -1408,43 +1461,7 @@ pub mod aiz_unstable {
             layer_activations
         }
 
-        fn special_run(&self,inputs: &[f64]) -> Self::SRunInfo {
-            let mut network_pre_activations = Vec::with_capacity(self.node_layout.len()-1);
-            let mut network_activations = Vec::with_capacity(self.node_layout.len());
-            network_activations.push(inputs.to_vec()); //remove this is possible
-            let mut layer_activations = Vec::with_capacity(self.node_layout[1]);
-            let mut layer_pre_activations = Vec::with_capacity(self.node_layout[1]);
-            for (node_bias,node_weights) in self.biases[0].iter().zip(self.weights[0].iter()) {
-                let mut node_val_before_activation_fn = *node_bias;
-                for (weight,previous_node_activation) in node_weights.iter().zip(inputs.iter()) {
-                    node_val_before_activation_fn += weight*previous_node_activation;
-                }
-                layer_pre_activations.push(node_val_before_activation_fn);
-                layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
-            }
-            for (layer_biases,layer_weights) in self.biases[1..self.biases.len()].iter().zip(self.weights[1..self.weights.len()].iter()) {
-                let mut new_layer_activations = Vec::with_capacity(layer_biases.len());
-                let mut new_layer_pre_activations = Vec::with_capacity(layer_biases.len());
-                for (node_bias,node_weights) in layer_biases.iter().zip(layer_weights.iter()) {
-                    let mut node_val_before_activation_fn = *node_bias;
-                    for (weight,previous_node_activation) in node_weights.iter().zip(layer_activations.iter()) {
-                        node_val_before_activation_fn += weight*previous_node_activation;
-                    }
-                    new_layer_pre_activations.push(node_val_before_activation_fn);
-                    new_layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
-                }
-                network_pre_activations.push(layer_pre_activations);
-                layer_pre_activations = new_layer_pre_activations;
-                network_activations.push(layer_activations);
-                layer_activations = new_layer_activations;
-            }
-            network_pre_activations.push(layer_pre_activations);
-            network_activations.push(layer_activations);
-
-            (network_activations,network_pre_activations)
-        }
-    
-        fn apply_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+        fn subtract_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
             for (layer_biases,layer_biases_gradient) in self.biases.iter_mut().zip(gradient.0.iter()) {
                 for (bias, bias_gradient) in layer_biases.iter_mut().zip(layer_biases_gradient.iter()) {
                     *bias -= bias_gradient*learning_rate;
@@ -1459,12 +1476,81 @@ pub mod aiz_unstable {
             }
         }
 
+        fn add_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+            for (layer_biases,layer_biases_gradient) in self.biases.iter_mut().zip(gradient.0.iter()) {
+                for (bias, bias_gradient) in layer_biases.iter_mut().zip(layer_biases_gradient.iter()) {
+                    *bias += bias_gradient*learning_rate;
+                }
+            }
+            for (layer_weights,layer_weights_gradient) in self.weights.iter_mut().zip(gradient.1.iter()) {
+                for (node_weights,node_weights_gradient) in layer_weights.iter_mut().zip(layer_weights_gradient.iter()) {
+                    for (weight, weight_gradient) in node_weights.iter_mut().zip(node_weights_gradient.iter()) {
+                        *weight += weight_gradient*learning_rate
+                    }
+                }
+            }
+        }
+
+        fn build_zero_gradient(&self) -> Self::Gradient {
+            let mut biases = Vec::with_capacity(self.node_layout.len());
+            let mut weights = Vec::with_capacity(self.node_layout.len());
+            for (layer, previous_layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+                let mut layer_biases = Vec::with_capacity(*layer);
+                let mut layer_weights = Vec::with_capacity(*layer);
+                for _ in 0..*layer {
+                    layer_biases.push(0.0);
+                    let mut node_weights = Vec::with_capacity(*previous_layer);
+                    for _ in 0..*previous_layer {
+                        node_weights.push(0.0);
+                    }
+                    layer_weights.push(node_weights);
+                }
+                biases.push(layer_biases);
+                weights.push(layer_weights);
+            }
+            (biases,weights)
+        }
+
         //TO DO: Check with_capacity's
         fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient {
             let mut biases_gradient = Vec::with_capacity(self.node_layout.len());
             let mut weights_gradient = Vec::with_capacity(self.node_layout.len());
             
-            let (network_activations,network_pre_activations) = self.special_run(training_in);
+            let (network_activations,network_pre_activations) = {
+                let mut network_pre_activations = Vec::with_capacity(self.node_layout.len()-1);
+                let mut network_activations = Vec::with_capacity(self.node_layout.len());
+                network_activations.push(training_in.to_vec()); //remove this is possible
+                let mut layer_activations = Vec::with_capacity(self.node_layout[1]);
+                let mut layer_pre_activations = Vec::with_capacity(self.node_layout[1]);
+                for (node_bias,node_weights) in self.biases[0].iter().zip(self.weights[0].iter()) {
+                    let mut node_val_before_activation_fn = *node_bias;
+                    for (weight,previous_node_activation) in node_weights.iter().zip(training_in.iter()) {
+                        node_val_before_activation_fn += weight*previous_node_activation;
+                    }
+                    layer_pre_activations.push(node_val_before_activation_fn);
+                    layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
+                }
+                for (layer_biases,layer_weights) in self.biases[1..self.biases.len()].iter().zip(self.weights[1..self.weights.len()].iter()) {
+                    let mut new_layer_activations = Vec::with_capacity(layer_biases.len());
+                    let mut new_layer_pre_activations = Vec::with_capacity(layer_biases.len());
+                    for (node_bias,node_weights) in layer_biases.iter().zip(layer_weights.iter()) {
+                        let mut node_val_before_activation_fn = *node_bias;
+                        for (weight,previous_node_activation) in node_weights.iter().zip(layer_activations.iter()) {
+                            node_val_before_activation_fn += weight*previous_node_activation;
+                        }
+                        new_layer_pre_activations.push(node_val_before_activation_fn);
+                        new_layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
+                    }
+                    network_pre_activations.push(layer_pre_activations);
+                    layer_pre_activations = new_layer_pre_activations;
+                    network_activations.push(layer_activations);
+                    layer_activations = new_layer_activations;
+                }
+                network_pre_activations.push(layer_pre_activations);
+                network_activations.push(layer_activations);
+    
+                (network_activations,network_pre_activations)
+            }; //special run  but inlined
 
             //last layer specific calculations
             let mut last_layer_biases_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-1]);
@@ -1512,38 +1598,76 @@ pub mod aiz_unstable {
             (biases_gradient,weights_gradient)
         }
     
-        fn build_zero_gradient(&self) -> Self::Gradient {
-            let mut biases = Vec::with_capacity(self.node_layout.len());
-            let mut weights = Vec::with_capacity(self.node_layout.len());
-            for (layer, previous_layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
-                let mut layer_biases = Vec::with_capacity(*layer);
-                let mut layer_weights = Vec::with_capacity(*layer);
-                for _ in 0..*layer {
-                    layer_biases.push(0.0);
-                    let mut node_weights = Vec::with_capacity(*previous_layer);
-                    for _ in 0..*previous_layer {
-                        node_weights.push(0.0);
-                    }
-                    layer_weights.push(node_weights);
-                }
-                biases.push(layer_biases);
-                weights.push(layer_weights);
-            }
-            (biases,weights)
-        }
     }
-
-    mod splice {
-        use super::*;
-
-        pub trait SpliceableNetwork: Network {
-            type SSRunAddInfo;
-
-            fn s_special_run(&self,inputs: &[f64]) -> Self::SSRunAddInfo;
-            fn der_run(&self,output_node_ders: &[f64],add_info: Self::SSRunAddInfo) -> Self::Gradient;
-            fn get_num_inputs(&self) -> usize;
-            fn get_num_outputs(&self) -> usize; //solely to validate if it is a valid spliced network
+    
+    impl FlattenableGradient for MultiLayerPerceptron{
+        fn flatten_gradient(gradient: Self::Gradient) -> Vec<f64> {
+            let mut output = Vec::new();
+            for layer_biases in gradient.0 {
+                for bias in layer_biases {
+                    output.push(bias);
+                }
+            }
+            for layer_weights in gradient.1 {
+                for node_weights in layer_weights {
+                    for weight in node_weights {
+                        output.push(weight);
+                    }
+                }
+            }
+            output
         }
+
+        fn subtract_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64) {
+            let mut flat_gradient_iter = flat_gradient.iter();
+            for layer_biases in &mut self.biases {
+                for bias in layer_biases {
+                    *bias -= match flat_gradient_iter.next() {Some(x) => x, None => {panic!("flattened gradient doesn't match the network")}} * learning_rate;
+                }
+            }
+            for layer_weights in &mut self.weights {
+                for node_weights in layer_weights {
+                    for weight in node_weights {
+                        *weight -= match flat_gradient_iter.next() {Some(x) => x, None => {panic!("flattened gradient doesn't match the network")}} * learning_rate;
+                    }
+                }
+            }
+        }
+
+        fn add_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64) {
+            let mut flat_gradient_iter = flat_gradient.iter();
+            for layer_biases in &mut self.biases {
+                for bias in layer_biases {
+                    *bias += match flat_gradient_iter.next() {Some(x) => x, None => {panic!("flattened gradient doesn't match the network")}} * learning_rate;
+                }
+            }
+            for layer_weights in &mut self.weights {
+                for node_weights in layer_weights {
+                    for weight in node_weights {
+                        *weight += match flat_gradient_iter.next() {Some(x) => x, None => {panic!("flattened gradient doesn't match the network")}} * learning_rate;
+                    }
+                }
+            }
+        }
+
+        fn build_zero_flat_gradient(&self) -> Vec<f64> {
+            let mut output = Vec::new();
+            for _ in 0..self.get_num_params() {
+                output.push(0.0);
+            }
+            output
+        }
+
+        //May be better to just store this in a variable, though its like no performance loss
+        fn get_num_params(&self) -> usize {
+            let mut num_params = 0;
+            for (previous_layer,current_layer) in self.node_layout[0..self.node_layout.len()-1].iter().zip(self.node_layout[1..self.node_layout.len()].iter()) {
+                num_params += previous_layer * current_layer + current_layer;
+            }
+            num_params
+        }
+
+
     }
 }
 
