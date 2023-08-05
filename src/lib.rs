@@ -770,6 +770,7 @@ pub mod aiz_unstable {
     //RNG, figure it out yourself
     use std::sync::mpsc; //communicating between threads
     use rand::seq::SliceRandom; //stochastic stuf
+    use std::collections::VecDeque; //for l_bfgs memory buffer
 
     //could be a iterator, probably
     //assumes the inner vectors are of equal length
@@ -849,6 +850,7 @@ pub mod aiz_unstable {
 
     pub trait Gradient: Send + Sync {
         fn add(&mut self,other: Self);
+        fn mult(&mut self,factor: f64);
         fn div(&mut self,divisor: f64);
         fn dot_product(&self,other: &Self) -> f64;
     }
@@ -864,6 +866,20 @@ pub mod aiz_unstable {
                 for (self_weights_node,other_weights_node) in self_weights_layer.iter_mut().zip(other_weights_layer.into_iter()) {
                     for (self_weight, other_weight) in self_weights_node.iter_mut().zip(other_weights_node.into_iter()) {
                         *self_weight += other_weight
+                    }
+                }
+            }
+        }
+        fn mult(&mut self,factor: f64) {
+            for biases_layer in &mut self.0 {
+                for bias in biases_layer {
+                    *bias *= factor;
+                }
+            }
+            for weights_layer in &mut self.1 {
+                for weights_node in weights_layer {
+                    for weight in weights_node {
+                        *weight *= factor;
                     }
                 }
             }
@@ -1167,10 +1183,166 @@ pub mod aiz_unstable {
 
     pub trait FlattenableGradient: Network {
         fn flatten_gradient(gradient: Self::Gradient) -> Vec<f64>;
+        fn flatten_ref_gradient(gradient: &Self::Gradient) -> Vec<&f64>;
         fn subtract_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64);
         fn add_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64);
         fn build_zero_flat_gradient(&self) -> Vec<f64>;
         fn get_num_params(&self) -> usize;
+    }
+
+    pub trait FlattenableGradientInherentMethods: FlattenableGradient {
+        fn l_bfgs_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            iteration_memory: usize,
+            first_checked_rate: f64,
+            rate_degradation_factor: f64,
+            tolerance_parameter: f64,
+            minimum_learning_rate: f64,
+            max_iterations: u32
+        );
+    }
+
+    impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
+        fn l_bfgs_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            iteration_memory: usize,
+            first_checked_rate: f64,
+            rate_degradation_factor: f64,
+            tolerance_parameter: f64,
+            minimum_learning_rate: f64,
+            max_iterations: u32
+        ) {
+            let mut applied_gradient_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
+            let mut gradient_change_mem = VecDeque::with_capacity(iteration_memory);
+            let mut p_mem = VecDeque::with_capacity(iteration_memory); //-10% know what to call this var
+            
+            let mut previous_test = self.test(training_data);
+            println!("{}",previous_test);
+
+            let gradient = self.back_propagation(training_data);
+            let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
+            let mut current_learning_rate = first_checked_rate;
+            self.subtract_gradient(&gradient,current_learning_rate);
+            let mut new_test = self.test(training_data);
+            println!("{}",new_test);
+            while previous_test - new_test < current_learning_rate * tolerable_local_slope {
+                println!("Improvement: {}",previous_test-new_test);
+                println!("Required:    {}", current_learning_rate * tolerable_local_slope);
+                current_learning_rate *= rate_degradation_factor;
+                println!("Looping: {}",current_learning_rate);
+                if current_learning_rate < minimum_learning_rate {
+                    self.subtract_gradient(&gradient, current_learning_rate / rate_degradation_factor);
+                    return ();
+                }
+                self.subtract_gradient(&gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
+                new_test = self.test(training_data);
+                println!("{}",new_test);
+            }
+            previous_test = new_test;
+
+            let mut applied_gradient = Vec::new();
+            for param in <Self>::flatten_ref_gradient(&gradient) {
+                applied_gradient.push(param*current_learning_rate);
+            }
+
+            applied_gradient_mem.push_back(applied_gradient);
+            
+            let mut previous_gradient: Vec<f64> = <Self>::flatten_gradient(gradient); 
+            'main_loop: for _ in 0..max_iterations-1 {
+                let current_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+                let mut gradient_change_vec = Vec::with_capacity(current_gradient.len());
+                for (current_param_der,previous_param_der) in current_gradient.iter().zip(previous_gradient.into_iter()) {
+                    gradient_change_vec.push(current_param_der-previous_param_der);
+                }
+                previous_gradient = current_gradient.clone(); //expensive, not sure if there is another way
+                let mut applied_n_change_gradient_dot = 0.0; 
+                for (param_der,param_der_change) in applied_gradient_mem[applied_gradient_mem.len()-1].iter().zip(gradient_change_vec.iter()) {
+                    applied_n_change_gradient_dot += param_der * param_der_change;
+                }
+                if p_mem.len() == 10 {
+                    p_mem.pop_front();
+                    gradient_change_mem.pop_front();
+                }
+                p_mem.push_back(1.0/applied_n_change_gradient_dot);
+                gradient_change_mem.push_back(gradient_change_vec);
+                //after this point many var names taken directly from math as i dont know what they mean
+                let mut q = current_gradient;
+                let mut alpha_vec = Vec::new();
+                for (p,(applied_gradient,gradient_change)) in (p_mem.iter().zip(applied_gradient_mem.iter().zip(gradient_change_mem.iter()))).rev() {
+                    let mut alpha = 0.0;
+                    for (param_der,param_q) in applied_gradient.iter().zip(q.iter()) {
+                        alpha += param_der*param_q;
+                    }
+                    alpha *= p;
+                    for (param_q,gradient_param_change) in q.iter_mut().zip(gradient_change.iter()) {
+                        *param_q -= alpha * gradient_param_change;
+                    }
+                    alpha_vec.push(alpha);
+                }
+                let mut mult_numerator = 0.0;
+                let mut mult_denominator = 0.0;
+                for (applied_param_der,gradient_param_change) in applied_gradient_mem[applied_gradient_mem.len()-1].iter().zip(gradient_change_mem[gradient_change_mem.len()-1].iter()) {
+                    mult_numerator += applied_param_der*gradient_param_change;
+                    mult_denominator += gradient_param_change*gradient_param_change;
+                }
+                let mult = mult_numerator/mult_denominator;
+                let mut z  = Vec::new();
+                for param in q {
+                    z.push(param*mult);
+                }
+                for (p,(applied_gradient,(gradient_change,alpha))) in p_mem.iter().zip(applied_gradient_mem.iter().zip(gradient_change_mem.iter().zip(alpha_vec.into_iter()))) {
+                    let mut beta = 0.0;
+                    for (gradient_param_change,param_z) in gradient_change.iter().zip(z.iter()) {
+                        beta += gradient_param_change * param_z;
+                    }
+                    beta *= p;
+                    let alpha_beta_dif = alpha-beta;
+                    for (param_z,applied_param_der) in z.iter_mut().zip(applied_gradient.iter()) {
+                        *param_z += applied_param_der*alpha_beta_dif;
+                    }
+                }
+                for param_z in z.iter_mut() {
+                    *param_z *= -1.0;
+                }
+
+                let mut tolerable_local_slope = 0.0;
+                for (param_der,param_z) in previous_gradient.iter().zip(z.iter()) {
+                    tolerable_local_slope += param_der * param_z;
+                }
+                tolerable_local_slope *= tolerance_parameter;
+                let mut current_learning_rate = first_checked_rate;
+                self.subtract_flat_gradient(&z,current_learning_rate);
+                let mut new_test = self.test(training_data);
+                println!("{}",new_test);
+                while previous_test - new_test < current_learning_rate * tolerable_local_slope {
+                    println!("Improvement: {}",previous_test-new_test);
+                    println!("Required:    {}", current_learning_rate * tolerable_local_slope);
+                    current_learning_rate *= rate_degradation_factor;
+                    println!("Looping: {}",current_learning_rate);
+                    if current_learning_rate < minimum_learning_rate {
+                        self.subtract_flat_gradient(&z, current_learning_rate / rate_degradation_factor);
+                        break 'main_loop;
+                    }
+                    self.subtract_flat_gradient(&z, current_learning_rate-(current_learning_rate/rate_degradation_factor));
+                    new_test = self.test(training_data);
+                    println!("{}",new_test);
+                }
+                previous_test = new_test;
+                if applied_gradient_mem.len() == 10 {
+                    applied_gradient_mem.pop_front();
+                }
+
+                for param_z in z.iter_mut() {
+                    *param_z *= current_learning_rate;
+                }
+                applied_gradient_mem.push_back(z);
+            }
+
+            
+
+        }
     }
 
     pub struct ActivationFn(pub fn(f64) -> f64,pub fn(f64) -> f64);
@@ -1609,6 +1781,23 @@ pub mod aiz_unstable {
                 }
             }
             for layer_weights in gradient.1 {
+                for node_weights in layer_weights {
+                    for weight in node_weights {
+                        output.push(weight);
+                    }
+                }
+            }
+            output
+        }
+
+        fn flatten_ref_gradient(gradient: &Self::Gradient) -> Vec<&f64> {
+            let mut output = Vec::new();
+            for layer_biases in &gradient.0 {
+                for bias in layer_biases {
+                    output.push(bias);
+                }
+            }
+            for layer_weights in &gradient.1 {
                 for node_weights in layer_weights {
                     for weight in node_weights {
                         output.push(weight);
