@@ -422,7 +422,7 @@ pub mod aiz {
         pub fn core_back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             let mut average_biases_gradient = Vec::with_capacity(self.node_layout.len());
             let mut average_weights_gradient = Vec::with_capacity(self.node_layout.len());
-            for (previous_layer, layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+            for (layer, previous_layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
                 let mut layer_biases = Vec::with_capacity(*layer);
                 let mut layer_weights = Vec::with_capacity(*layer);
                 for _ in 0..*layer {
@@ -470,7 +470,7 @@ pub mod aiz {
         pub fn core_multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             let mut average_biases_gradient = Vec::with_capacity(self.node_layout.len());
             let mut average_weights_gradient = Vec::with_capacity(self.node_layout.len());
-            for (previous_layer, layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+            for (layer, previous_layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
                 let mut layer_biases = Vec::with_capacity(*layer);
                 let mut layer_weights = Vec::with_capacity(*layer);
                 for _ in 0..*layer {
@@ -534,7 +534,7 @@ pub mod aiz {
         pub fn core_stochastic_multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>,batch_size_per_thread: usize) -> (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) {
             let mut average_biases_gradient = Vec::with_capacity(self.node_layout.len());
             let mut average_weights_gradient = Vec::with_capacity(self.node_layout.len());
-            for (previous_layer, layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+            for (layer, previous_layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
                 let mut layer_biases = Vec::with_capacity(*layer);
                 let mut layer_weights = Vec::with_capacity(*layer);
                 for _ in 0..*layer {
@@ -1353,7 +1353,7 @@ pub mod aiz_unstable {
         }
         pub fn sigmoid_call_der(x: f64) -> f64 {
             let temp_val = 1.0/(1.0+(-x).exp());
-            temp_val*(1.0*temp_val)
+            temp_val*(1.0-temp_val)
         }
     
         pub fn linear_call(x: f64) -> f64 {
@@ -1431,7 +1431,6 @@ pub mod aiz_unstable {
     //pub const : ActivationFn = ActivationFn(activation_fn_backend::_call,activation_fn_backend::_call_der);
 
     //here be actual structs
-
     pub struct MultiLayerPerceptron {
         biases: Vec<Vec<f64>>,
         weights: Vec<Vec<Vec<f64>>>,
@@ -1862,11 +1861,58 @@ pub mod aiz_unstable {
 
 #[cfg(test)]
 mod tests {
+    use super::aiz_unstable::NetworkInherentMethods;
+    use super::aiz_unstable::Network;
     use super::*;
+    use super::aiz_unstable::FileSupport;
 
     #[test]
     fn mlp_into_and_from_bytes() {
         let nn = aiz::NeuralNetwork::new(vec![10,5,20,16],1.0,1.0);
         assert_eq!(nn,aiz::NeuralNetwork::from_bytes(nn.clone().into_bytes()));
+    }
+
+    #[test]
+    fn identical_gradients() {
+        let nn_stable = aiz::NeuralNetwork::new(vec![2,3,3,4],1.0,1.0);
+        let nn_unstable = aiz_unstable::MultiLayerPerceptron::from_bytes(nn_stable.clone().into_bytes(), aiz_unstable::SIGMOID);
+        /*
+        let nn_stable_str = format!("{:#?}",nn_stable);
+        let nn_unstable_str = format!("{:#?}",nn_unstable);
+        for (stable_line,unstable_line) in nn_stable_str.lines().zip(nn_unstable_str.lines()) {
+            println!("{}\t\t\t\t{}",stable_line,unstable_line);
+        }
+        */
+        let (biases_stable_gradient,weights_stable_gradient) = nn_stable.core_back_propagation(&vec![(vec![1.0,0.0],vec![0.0,0.33,0.66,1.0])]);
+        let (biases_unstable_gradinet,weights_unstable_gradient) = nn_unstable.back_propagation(&vec![(vec![1.0,0.0],vec![0.0,0.33,0.66,1.0])]);
+        let nn_stable_str = format!("{:?}",biases_stable_gradient);
+        let nn_unstable_str = format!("{:?}",biases_unstable_gradinet);
+        for (stable_line,unstable_line) in nn_stable_str.lines().zip(nn_unstable_str.lines()) {
+            println!("{}\n{}",stable_line,unstable_line);
+        }
+
+        for (layer_stable_bias,layer_unstable_bias) in biases_stable_gradient.iter().zip(biases_unstable_gradinet.iter()) {
+            for (stable_bias,unstable_bias) in layer_stable_bias.iter().zip(layer_unstable_bias.iter()) {
+                assert_eq!(stable_bias,unstable_bias);
+            }
+        }
+        for (layer_stable_weight,layer_unstable_weight) in weights_stable_gradient.iter().zip(weights_unstable_gradient.iter()) {
+            for (node_stable_weight,node_unstable_weight) in layer_stable_weight.iter().zip(layer_unstable_weight.iter()) {
+                for (stable_weight,unstable_weight) in node_stable_weight.iter().zip(node_unstable_weight.iter()) {
+                    assert_eq!(stable_weight,unstable_weight);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identical_runs() {
+        let nn_stable = aiz::NeuralNetwork::new(vec![2,3,3,4],1.0,1.0);
+        let nn_unstable = aiz_unstable::MultiLayerPerceptron::from_bytes(nn_stable.clone().into_bytes(), aiz_unstable::SIGMOID);
+        let stable_out = nn_stable.run(&vec![1.0,0.0]);
+        let unstable_out = nn_unstable.run(&vec![1.0,0.0]);
+        for (single_stable_out,single_unstable_out) in stable_out.iter().zip(unstable_out.iter()) {
+            assert_eq!(single_stable_out,single_unstable_out);
+        }
     }
 }
