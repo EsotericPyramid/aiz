@@ -351,7 +351,7 @@ pub mod aiz {
             output / length as f64
         }
 
-        fn apply_gradient(&mut self, biases_gradient: &Vec<Vec<f64>>, weights_gradient: &Vec<Vec<Vec<f64>>>,learning_rate: f64) {
+        pub fn apply_gradient(&mut self, biases_gradient: &Vec<Vec<f64>>, weights_gradient: &Vec<Vec<Vec<f64>>>,learning_rate: f64) {
             for (layer_biases,layer_biases_gradient) in self.biases.iter_mut().zip(biases_gradient.iter()) {
                 for (bias, bias_gradient) in layer_biases.iter_mut().zip(layer_biases_gradient.iter()) {
                     *bias -= bias_gradient*learning_rate;
@@ -1604,6 +1604,13 @@ pub mod aiz_unstable {
                 derivative_activation_fn: activation_fn.1
             }
         }
+    
+        pub fn get_biases(&self) -> &Vec<Vec<f64>> {
+            &self.biases
+        }
+        pub fn get_weights(&self) -> &Vec<Vec<Vec<f64>>> {
+            &self.weights
+        }
     }
 
     impl Network for MultiLayerPerceptron {
@@ -1873,16 +1880,20 @@ mod tests {
     }
 
     #[test]
+    fn identical_runs() {
+        let nn_stable = aiz::NeuralNetwork::new(vec![2,3,3,4],1.0,1.0);
+        let nn_unstable = aiz_unstable::MultiLayerPerceptron::from_bytes(nn_stable.clone().into_bytes(), aiz_unstable::SIGMOID);
+        let stable_out = nn_stable.run(&vec![1.0,0.0]);
+        let unstable_out = nn_unstable.run(&vec![1.0,0.0]);
+        for (single_stable_out,single_unstable_out) in stable_out.iter().zip(unstable_out.iter()) {
+            assert_eq!(single_stable_out,single_unstable_out);
+        }
+    }
+
+    #[test]
     fn identical_gradients() {
         let nn_stable = aiz::NeuralNetwork::new(vec![2,3,3,4],1.0,1.0);
         let nn_unstable = aiz_unstable::MultiLayerPerceptron::from_bytes(nn_stable.clone().into_bytes(), aiz_unstable::SIGMOID);
-        /*
-        let nn_stable_str = format!("{:#?}",nn_stable);
-        let nn_unstable_str = format!("{:#?}",nn_unstable);
-        for (stable_line,unstable_line) in nn_stable_str.lines().zip(nn_unstable_str.lines()) {
-            println!("{}\t\t\t\t{}",stable_line,unstable_line);
-        }
-        */
         let (biases_stable_gradient,weights_stable_gradient) = nn_stable.core_back_propagation(&vec![(vec![1.0,0.0],vec![0.0,0.33,0.66,1.0])]);
         let (biases_unstable_gradinet,weights_unstable_gradient) = nn_unstable.back_propagation(&vec![(vec![1.0,0.0],vec![0.0,0.33,0.66,1.0])]);
         let nn_stable_str = format!("{:?}",biases_stable_gradient);
@@ -1906,13 +1917,26 @@ mod tests {
     }
 
     #[test]
-    fn identical_runs() {
-        let nn_stable = aiz::NeuralNetwork::new(vec![2,3,3,4],1.0,1.0);
-        let nn_unstable = aiz_unstable::MultiLayerPerceptron::from_bytes(nn_stable.clone().into_bytes(), aiz_unstable::SIGMOID);
-        let stable_out = nn_stable.run(&vec![1.0,0.0]);
-        let unstable_out = nn_unstable.run(&vec![1.0,0.0]);
-        for (single_stable_out,single_unstable_out) in stable_out.iter().zip(unstable_out.iter()) {
-            assert_eq!(single_stable_out,single_unstable_out);
+    fn identical_after_apply() {
+        let mut nn_stable = aiz::NeuralNetwork::new(vec![2,3,3,4],1.0,1.0);
+        let mut nn_unstable = aiz_unstable::MultiLayerPerceptron::from_bytes(nn_stable.clone().into_bytes(), aiz_unstable::SIGMOID);
+        let (biases_stable_gradient,weights_stable_gradient) = nn_stable.core_back_propagation(&vec![(vec![1.0,0.0],vec![0.0,0.33,0.66,1.0])]);
+        let (biases_unstable_gradinet,weights_unstable_gradient) = nn_unstable.back_propagation(&vec![(vec![1.0,0.0],vec![0.0,0.33,0.66,1.0])]);
+        nn_stable.apply_gradient(&biases_stable_gradient, &weights_stable_gradient, 1.0);
+        nn_unstable.subtract_gradient(&(biases_unstable_gradinet,weights_unstable_gradient), 1.0);
+        for (layer_stable_biases,layer_unstable_biases) in nn_stable.get_biases().iter().zip(nn_unstable.get_biases().iter()) {
+            for (stable_bias,unstable_bias) in layer_stable_biases.iter().zip(layer_unstable_biases.iter()) {
+                assert_eq!(stable_bias,unstable_bias);
+            }
+        }
+        for (layer_stable_weights,layer_unstable_weights) in nn_stable.get_weights().iter().zip(nn_unstable.get_weights().iter()) {
+            for (node_stable_weights,node_unstable_weights) in layer_stable_weights.iter().zip(layer_unstable_weights.iter()) {
+                for (stable_weight,unstable_weight) in node_stable_weights.iter().zip(node_unstable_weights.iter()) {
+                    assert_eq!(stable_weight,unstable_weight);
+                }
+            }
         }
     }
+
+    
 }
