@@ -2,7 +2,7 @@
 pub mod aiz {
     use rand::Rng; //To inititalize networks randomly
     use rand::seq::SliceRandom; //to sample random groups of examples from the data for stochastic training
-    use crossbeam; //To use immuttable non-static references in threads through its scoped threads
+    use std::thread; //Multithreading
     use std::sync::mpsc; //communicating between threads
 
     //could be a iterator, probably
@@ -326,11 +326,11 @@ pub mod aiz {
 
         pub fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64 {
             let mut output = 0.0;
-            crossbeam::scope(|scope| {
+            thread::scope(|scope| {
                 let (original_transmitter,receiver) = mpsc::channel();
                 for partition in partitioned_test_data {
                     let cloned_transmitter = original_transmitter.clone();
-                    scope.spawn(move |_| {
+                    scope.spawn(move || {
                         for (test_in,test_expected_out) in partition {
                             for (single_real_out,single_expected_out) in self.run(test_in).iter().zip(test_expected_out.iter()) {
                                 let dif = single_real_out - single_expected_out;
@@ -343,7 +343,7 @@ pub mod aiz {
                 for single_example_loss in receiver {
                     output += single_example_loss;
                 }
-            }).unwrap();
+            });
             let mut length = 0;
             for partition in partitioned_test_data {
                 length += partition.len();
@@ -484,11 +484,11 @@ pub mod aiz {
                 average_biases_gradient.push(layer_biases);
                 average_weights_gradient.push(layer_weights);
             }
-            crossbeam::scope(|scope| {
+            thread::scope(|scope| {
                 let (original_transmitter,receiver) = mpsc::channel();
                 for partition in partitioned_training_data {
                     let cloned_transmitter = original_transmitter.clone();
-                    scope.spawn(move |_| {
+                    scope.spawn(move || {
                         for (training_in,training_out) in partition {
                             let gradient_pair = self.one_example_back_propagation(training_in, training_out);
                             cloned_transmitter.send(gradient_pair).unwrap();
@@ -510,7 +510,7 @@ pub mod aiz {
                         }
                     }
                 }
-            }).unwrap();
+            });
             let mut data_length = 0;
             for partition in partitioned_training_data {
                 data_length += partition.len()
@@ -548,11 +548,11 @@ pub mod aiz {
                 average_biases_gradient.push(layer_biases);
                 average_weights_gradient.push(layer_weights);
             }
-            crossbeam::scope(|scope| {
+            thread::scope(|scope| {
                 let (original_transmitter,receiver) = mpsc::channel();
                 for partition in partitioned_training_data {
                     let cloned_transmitter = original_transmitter.clone();
-                    scope.spawn(move |_| {
+                    scope.spawn(move || {
                         let mut rng = rand::thread_rng();
                         for (training_in,training_out) in partition.choose_multiple(&mut rng, batch_size_per_thread) {
                             let gradient_pair = self.one_example_back_propagation(training_in, training_out);
@@ -575,7 +575,7 @@ pub mod aiz {
                         }
                     }
                 }
-            }).unwrap();
+            });
             let mut data_length = 0;
             for partition in partitioned_training_data {
                 data_length += partition.len()
@@ -771,7 +771,8 @@ pub mod aiz_unstable {
     use std::sync::mpsc; //communicating between threads
     use rand::seq::SliceRandom; //stochastic stuf
     use std::collections::VecDeque; //for l_bfgs memory buffer
-
+    use std::thread; //multithreading
+    
     //could be a iterator, probably
     //assumes the inner vectors are of equal length
     pub fn transpose_matrix<T>(matrix: &Vec<Vec<T>>) -> Vec<Vec<&T>> {
@@ -969,11 +970,11 @@ pub mod aiz_unstable {
     
         fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64 {
             let mut output = 0.0;
-            crossbeam::scope(|scope| {
+            thread::scope(|scope| {
                 let (original_transmitter,receiver) = mpsc::channel();
                 for partition in partitioned_test_data {
                     let cloned_transmitter = original_transmitter.clone();
-                    scope.spawn(move |_| {
+                    scope.spawn(move || {
                         for (test_in,test_expected_out) in partition {
                             for (single_real_out,single_expected_out) in self.run(test_in).iter().zip(test_expected_out.iter()) {
                                 let dif = single_real_out - single_expected_out;
@@ -986,7 +987,7 @@ pub mod aiz_unstable {
                 for single_example_loss in receiver {
                     output += single_example_loss;
                 }
-            }).unwrap();
+            });
             let mut length = 0;
             for partition in partitioned_test_data {
                 length += partition.len();
@@ -1010,11 +1011,11 @@ pub mod aiz_unstable {
 
         fn multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> Self::Gradient {
             let mut output_gradient = self.build_zero_gradient();
-            crossbeam::scope(|scope| {
+            thread::scope(|scope| {
                 let (original_transmitter,receiver) = mpsc::channel();
                 for partition in partitioned_training_data {
                     let cloned_transmitter = original_transmitter.clone();
-                    scope.spawn(move |_| {
+                    scope.spawn(move || {
                         for (training_in,training_out) in partition {
                             let gradient_pair = self.one_example_back_propagation(training_in, training_out);
                             cloned_transmitter.send(gradient_pair).unwrap();
@@ -1025,7 +1026,7 @@ pub mod aiz_unstable {
                 for gradient in receiver {
                     output_gradient.add(gradient)
                 }
-            }).unwrap();
+            });
             let mut data_length = 0;
             for partition in partitioned_training_data {
                 data_length += partition.len()
@@ -1036,11 +1037,11 @@ pub mod aiz_unstable {
 
         fn stochastic_multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>,batch_size: usize) -> Self::Gradient {
             let mut output_gradient = self.build_zero_gradient();
-            crossbeam::scope(|scope| {
+            thread::scope(|scope| {
                 let (original_transmitter,receiver) = mpsc::channel();
                 for partition in partitioned_training_data {
                     let cloned_transmitter = original_transmitter.clone();
-                    scope.spawn(move |_| {
+                    scope.spawn(move || {
                         let mut rng = rand::thread_rng();
                         for (training_in,training_out) in partition.choose_multiple(&mut rng, batch_size) {
                             let gradient_pair = self.one_example_back_propagation(training_in, training_out);
@@ -1052,7 +1053,7 @@ pub mod aiz_unstable {
                 for gradient in receiver {
                     output_gradient.add(gradient)
                 }
-            }).unwrap();
+            });
             let mut data_length = 0;
             for partition in partitioned_training_data {
                 data_length += partition.len()
