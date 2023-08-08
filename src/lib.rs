@@ -1197,9 +1197,37 @@ pub mod aiz_unstable {
             training_data: &Vec<(Vec<f64>,Vec<f64>)>,
             iteration_memory: usize,
             first_checked_rate: f64,
-            rate_degradation_factor: f64,
-            tolerance_parameter: f64,
-            minimum_learning_rate: f64,
+            improvement_vs_curvature_bias: f64,
+            slope_tolerance_parameter: f64,
+            curvature_tolerance_parameter: f64,
+            max_line_search_iterations: u32,
+            max_iterations: u32
+        );
+
+        fn multithreaded_l_bfgs_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            num_partitions: f64,
+            iteration_memory: usize,
+            first_checked_rate: f64,
+            improvement_vs_curvature_bias: f64,
+            slope_tolerance_parameter: f64,
+            curvature_tolerance_parameter: f64,
+            max_line_search_iterations: u32,
+            max_iterations: u32
+        );
+
+        fn stochastic_multithreaded_l_bfgs_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            num_partitions: f64,
+            batch_size: usize,
+            iteration_memory: usize,
+            first_checked_rate: f64,
+            improvement_vs_curvature_bias: f64,
+            slope_tolerance_parameter: f64,
+            curvature_tolerance_parameter: f64,
+            max_line_search_iterations: u32,
             max_iterations: u32
         );
     }
@@ -1210,139 +1238,534 @@ pub mod aiz_unstable {
             training_data: &Vec<(Vec<f64>,Vec<f64>)>,
             iteration_memory: usize,
             first_checked_rate: f64,
-            rate_degradation_factor: f64,
-            tolerance_parameter: f64,
-            minimum_learning_rate: f64,
+            improvement_vs_curvature_bias: f64,
+            slope_tolerance_parameter: f64,
+            curvature_tolerance_parameter: f64,
+            max_line_search_iterations: u32,
             max_iterations: u32
         ) {
-            let mut applied_gradient_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
-            let mut gradient_change_mem = VecDeque::with_capacity(iteration_memory);
-            let mut p_mem = VecDeque::with_capacity(iteration_memory); //-10% know what to call this var
-            
-            let mut previous_test = self.test(training_data);
-            println!("{}",previous_test);
+            let mut network_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
+            let mut gradient_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
+            let mut p_mem = VecDeque::with_capacity(iteration_memory);
 
-            let gradient = self.back_propagation(training_data);
-            let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
-            let mut current_learning_rate = first_checked_rate;
-            self.subtract_gradient(&gradient,current_learning_rate);
-            let mut new_test = self.test(training_data);
-            println!("{}",new_test);
-            while previous_test - new_test < current_learning_rate * tolerable_local_slope {
-                println!("Improvement: {}",previous_test-new_test);
-                println!("Required:    {}", current_learning_rate * tolerable_local_slope);
-                current_learning_rate *= rate_degradation_factor;
-                println!("Looping: {}",current_learning_rate);
-                if current_learning_rate < minimum_learning_rate {
-                    self.subtract_gradient(&gradient, current_learning_rate / rate_degradation_factor);
-                    return ();
-                }
-                self.subtract_gradient(&gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
+            let mut previous_test = self.test(training_data);
+            let current_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+            let mut search_direction = Vec::with_capacity(current_gradient.len());
+            let mut next_gradient = Vec::new();
+            for param_der in current_gradient.iter() {
+                search_direction.push(-param_der);
+            }
+            let mut applied_lr = 0.0;
+            let mut highest_curvature_failure = 0.0;
+            let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
+            let mut new_test = 0.0;
+            let mut local_slope = 0.0;
+            for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
+                local_slope += param_search_amount * param_der;
+            }
+            let tolerable_local_slope = slope_tolerance_parameter * local_slope;
+            let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+            for _ in 0..max_line_search_iterations {
+                let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
+                self.add_flat_gradient(&search_direction, next_lr-applied_lr);
+                applied_lr = next_lr;
                 new_test = self.test(training_data);
-                println!("{}",new_test);
+                println!("LR: {} \tTest: {}",applied_lr,new_test);
+                if new_test > previous_test + applied_lr * tolerable_local_slope {
+                    lowest_improvement_failure = applied_lr;
+                    continue
+                }
+                next_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+                let mut new_local_slope = 0.0;
+                for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
+                    new_local_slope += param_search_amount * new_param_der;
+                }
+                if new_local_slope.abs() > tolerable_non_local_slope {
+                    highest_curvature_failure = applied_lr;
+                    continue
+                }
+                break
             }
             previous_test = new_test;
 
-            let mut applied_gradient = Vec::new();
-            for param in <Self>::flatten_ref_gradient(&gradient) {
-                applied_gradient.push(param*current_learning_rate);
+            for param in search_direction.iter_mut() {
+                *param *= applied_lr;
             }
-
-            applied_gradient_mem.push_back(applied_gradient);
+            let mut gradient_change = Vec::new();
+            for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
+                gradient_change.push(next_param_der-param_der);
+            }
+            let mut reciprocal_p = 0.0;
+            for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
+                reciprocal_p += param_search_amount * param_der_change;
+            }
+            network_change_mem.push_back(search_direction);
+            gradient_change_mem.push_back(gradient_change);
+            p_mem.push_back(1.0/reciprocal_p);
             
-            let mut previous_gradient: Vec<f64> = <Self>::flatten_gradient(gradient); 
-            'main_loop: for _ in 0..max_iterations-1 {
-                let current_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
-                let mut gradient_change_vec = Vec::with_capacity(current_gradient.len());
-                for (current_param_der,previous_param_der) in current_gradient.iter().zip(previous_gradient.into_iter()) {
-                    gradient_change_vec.push(current_param_der-previous_param_der);
-                }
-                previous_gradient = current_gradient.clone(); //expensive, not sure if there is another way
-                let mut applied_n_change_gradient_dot = 0.0; 
-                for (param_der,param_der_change) in applied_gradient_mem[applied_gradient_mem.len()-1].iter().zip(gradient_change_vec.iter()) {
-                    applied_n_change_gradient_dot += param_der * param_der_change;
-                }
-                if p_mem.len() == 10 {
-                    p_mem.pop_front();
-                    gradient_change_mem.pop_front();
-                }
-                p_mem.push_back(1.0/applied_n_change_gradient_dot);
-                gradient_change_mem.push_back(gradient_change_vec);
-                //after this point many var names taken directly from math as i dont know what they mean
-                let mut q = current_gradient;
-                let mut alpha_vec = Vec::new();
-                for (p,(applied_gradient,gradient_change)) in (p_mem.iter().zip(applied_gradient_mem.iter().zip(gradient_change_mem.iter()))).rev() {
+            for _ in 1..max_iterations {
+                let current_gradient: Vec<f64> = next_gradient;
+                next_gradient = Vec::with_capacity(0);//cause rust doesnt want to skip the reinitialization
+                let mut search_direction = current_gradient.clone();
+                
+                let mut alpha_mem = Vec::new();
+                for (network_change,(gradient_change,p)) in (
+                network_change_mem.iter().zip(
+                gradient_change_mem.iter().zip(
+                p_mem.iter()))
+                ).rev() {
                     let mut alpha = 0.0;
-                    for (param_der,param_q) in applied_gradient.iter().zip(q.iter()) {
-                        alpha += param_der*param_q;
+                    for (param_change,param_search_amount) in network_change.iter().zip(search_direction.iter()) {
+                        alpha += param_change * param_search_amount;
                     }
                     alpha *= p;
-                    for (param_q,gradient_param_change) in q.iter_mut().zip(gradient_change.iter()) {
-                        *param_q -= alpha * gradient_param_change;
+                    for (param_search_amount,param_der_change) in search_direction.iter_mut().zip(gradient_change.iter()) {
+                        *param_search_amount -= alpha * param_der_change;
                     }
-                    alpha_vec.push(alpha);
+                    alpha_mem.push(alpha);
                 }
+
                 let mut mult_numerator = 0.0;
                 let mut mult_denominator = 0.0;
-                for (applied_param_der,gradient_param_change) in applied_gradient_mem[applied_gradient_mem.len()-1].iter().zip(gradient_change_mem[gradient_change_mem.len()-1].iter()) {
-                    mult_numerator += applied_param_der*gradient_param_change;
-                    mult_denominator += gradient_param_change*gradient_param_change;
+                for (param_change,param_der_change) in network_change_mem[network_change_mem.len()-1].iter().zip(gradient_change_mem[gradient_change_mem.len()-1].iter()) {
+                    mult_numerator += param_change * param_der_change;
+                    mult_denominator += param_der_change * param_der_change;
                 }
                 let mult = mult_numerator/mult_denominator;
-                let mut z  = Vec::new();
-                for param in q {
-                    z.push(param*mult);
-                }
-                for (p,(applied_gradient,(gradient_change,alpha))) in p_mem.iter().zip(applied_gradient_mem.iter().zip(gradient_change_mem.iter().zip(alpha_vec.into_iter()))) {
-                    let mut beta = 0.0;
-                    for (gradient_param_change,param_z) in gradient_change.iter().zip(z.iter()) {
-                        beta += gradient_param_change * param_z;
-                    }
-                    beta *= p;
-                    let alpha_beta_dif = alpha-beta;
-                    for (param_z,applied_param_der) in z.iter_mut().zip(applied_gradient.iter()) {
-                        *param_z += applied_param_der*alpha_beta_dif;
-                    }
-                }
-                for param_z in z.iter_mut() {
-                    *param_z *= -1.0;
+                for param_search_amount in search_direction.iter_mut() {
+                    *param_search_amount *= mult;
                 }
 
-                let mut tolerable_local_slope = 0.0;
-                for (param_der,param_z) in previous_gradient.iter().zip(z.iter()) {
-                    tolerable_local_slope += param_der * param_z;
-                }
-                tolerable_local_slope *= tolerance_parameter;
-                let mut current_learning_rate = first_checked_rate;
-                self.subtract_flat_gradient(&z,current_learning_rate);
-                let mut new_test = self.test(training_data);
-                println!("{}",new_test);
-                while previous_test - new_test < current_learning_rate * tolerable_local_slope {
-                    println!("Improvement: {}",previous_test-new_test);
-                    println!("Required:    {}", current_learning_rate * tolerable_local_slope);
-                    current_learning_rate *= rate_degradation_factor;
-                    println!("Looping: {}",current_learning_rate);
-                    if current_learning_rate < minimum_learning_rate {
-                        self.subtract_flat_gradient(&z, current_learning_rate / rate_degradation_factor);
-                        break 'main_loop;
+                for (network_change,(gradient_change,(p,alpha))) in 
+                network_change_mem.iter().zip(
+                gradient_change_mem.iter().zip(
+                p_mem.iter().zip(
+                alpha_mem.iter().rev()
+                ))) {
+                    let mut beta = 0.0;
+                    for (param_der_change,param_search_amount) in gradient_change.iter().zip(search_direction.iter()) {
+                        beta += param_der_change * param_search_amount;
                     }
-                    self.subtract_flat_gradient(&z, current_learning_rate-(current_learning_rate/rate_degradation_factor));
+                    let alpha_beta_dif = alpha - beta * p;
+                    for (param_search_amount,param_change) in search_direction.iter_mut().zip(network_change.iter()) {
+                        *param_search_amount += param_change * alpha_beta_dif;
+                    }
+                }
+                for param in search_direction.iter_mut() {
+                    *param *= -1.0;
+                }
+
+                let mut applied_lr = 0.0;
+                let mut highest_curvature_failure = 0.0;
+                let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
+                let mut new_test = 0.0;
+                let mut local_slope = 0.0;
+                for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
+                    local_slope += param_search_amount * param_der;
+                }
+                let tolerable_local_slope = slope_tolerance_parameter * local_slope;
+                let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+                for _ in 0..max_line_search_iterations {
+                    let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
+                    self.add_flat_gradient(&search_direction, next_lr-applied_lr);
+                    applied_lr = next_lr;
                     new_test = self.test(training_data);
-                    println!("{}",new_test);
+                    println!("LR: {} \tTest: {}",applied_lr,new_test);
+                    if new_test > previous_test + applied_lr * tolerable_local_slope {
+                        lowest_improvement_failure = applied_lr;
+                        continue
+                    }
+                    next_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+                    let mut new_local_slope = 0.0;
+                    for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
+                        new_local_slope += param_search_amount * new_param_der;
+                    }
+                    if new_local_slope.abs() > tolerable_non_local_slope {
+                        highest_curvature_failure = applied_lr;
+                        continue
+                    }
+                    break
                 }
                 previous_test = new_test;
-                if applied_gradient_mem.len() == 10 {
-                    applied_gradient_mem.pop_front();
+                if p_mem.len() == iteration_memory {
+                    network_change_mem.pop_front();
+                    gradient_change_mem.pop_front();
+                    p_mem.pop_front();
                 }
-
-                for param_z in z.iter_mut() {
-                    *param_z *= current_learning_rate;
+                for param in search_direction.iter_mut() {
+                    *param *= applied_lr;
                 }
-                applied_gradient_mem.push_back(z);
+                let mut gradient_change = Vec::new();
+                for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
+                    gradient_change.push(next_param_der-param_der);
+                }
+                let mut reciprocal_p = 0.0;
+                for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
+                    reciprocal_p += param_search_amount * param_der_change;
+                }
+                network_change_mem.push_back(search_direction);
+                gradient_change_mem.push_back(gradient_change);
+                p_mem.push_back(1.0/reciprocal_p);
             }
+        }
+    
+        fn multithreaded_l_bfgs_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            num_partitions: f64,
+            iteration_memory: usize,
+            first_checked_rate: f64,
+            improvement_vs_curvature_bias: f64,
+            slope_tolerance_parameter: f64,
+            curvature_tolerance_parameter: f64,
+            max_line_search_iterations: u32,
+            max_iterations: u32
+        ) { 
+            let partitioned_training_data = partition_data(training_data, num_partitions);
 
+            let mut network_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
+            let mut gradient_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
+            let mut p_mem = VecDeque::with_capacity(iteration_memory);
+
+            let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+            let current_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
+            let mut search_direction = Vec::with_capacity(current_gradient.len());
+            let mut next_gradient = Vec::new();
+            for param_der in current_gradient.iter() {
+                search_direction.push(-param_der);
+            }
+            let mut applied_lr = 0.0;
+            let mut highest_curvature_failure = 0.0;
+            let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
+            let mut new_test = 0.0;
+            let mut local_slope = 0.0;
+            for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
+                local_slope += param_search_amount * param_der;
+            }
+            let tolerable_local_slope = slope_tolerance_parameter * local_slope;
+            let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+            for _ in 0..max_line_search_iterations {
+                let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
+                self.add_flat_gradient(&search_direction, next_lr-applied_lr);
+                applied_lr = next_lr;
+                new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                println!("LR: {} \tTest: {}",applied_lr,new_test);
+                if new_test > previous_test + applied_lr * tolerable_local_slope {
+                    lowest_improvement_failure = applied_lr;
+                    continue
+                }
+                next_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
+                let mut new_local_slope = 0.0;
+                for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
+                    new_local_slope += param_search_amount * new_param_der;
+                }
+                if new_local_slope.abs() > tolerable_non_local_slope {
+                    highest_curvature_failure = applied_lr;
+                    continue
+                }
+                break
+            }
+            previous_test = new_test;
+
+            for param in search_direction.iter_mut() {
+                *param *= applied_lr;
+            }
+            let mut gradient_change = Vec::new();
+            for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
+                gradient_change.push(next_param_der-param_der);
+            }
+            let mut reciprocal_p = 0.0;
+            for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
+                reciprocal_p += param_search_amount * param_der_change;
+            }
+            network_change_mem.push_back(search_direction);
+            gradient_change_mem.push_back(gradient_change);
+            p_mem.push_back(1.0/reciprocal_p);
             
+            for _ in 1..max_iterations {
+                let current_gradient: Vec<f64> = next_gradient;
+                next_gradient = Vec::with_capacity(0);//cause rust doesnt want to skip the reinitialization
+                let mut search_direction = current_gradient.clone();
+                
+                let mut alpha_mem = Vec::new();
+                for (network_change,(gradient_change,p)) in (
+                network_change_mem.iter().zip(
+                gradient_change_mem.iter().zip(
+                p_mem.iter()))
+                ).rev() {
+                    let mut alpha = 0.0;
+                    for (param_change,param_search_amount) in network_change.iter().zip(search_direction.iter()) {
+                        alpha += param_change * param_search_amount;
+                    }
+                    alpha *= p;
+                    for (param_search_amount,param_der_change) in search_direction.iter_mut().zip(gradient_change.iter()) {
+                        *param_search_amount -= alpha * param_der_change;
+                    }
+                    alpha_mem.push(alpha);
+                }
 
+                let mut mult_numerator = 0.0;
+                let mut mult_denominator = 0.0;
+                for (param_change,param_der_change) in network_change_mem[network_change_mem.len()-1].iter().zip(gradient_change_mem[gradient_change_mem.len()-1].iter()) {
+                    mult_numerator += param_change * param_der_change;
+                    mult_denominator += param_der_change * param_der_change;
+                }
+                let mult = mult_numerator/mult_denominator;
+                for param_search_amount in search_direction.iter_mut() {
+                    *param_search_amount *= mult;
+                }
+
+                for (network_change,(gradient_change,(p,alpha))) in 
+                network_change_mem.iter().zip(
+                gradient_change_mem.iter().zip(
+                p_mem.iter().zip(
+                alpha_mem.iter().rev()
+                ))) {
+                    let mut beta = 0.0;
+                    for (param_der_change,param_search_amount) in gradient_change.iter().zip(search_direction.iter()) {
+                        beta += param_der_change * param_search_amount;
+                    }
+                    let alpha_beta_dif = alpha - beta * p;
+                    for (param_search_amount,param_change) in search_direction.iter_mut().zip(network_change.iter()) {
+                        *param_search_amount += param_change * alpha_beta_dif;
+                    }
+                }
+                for param in search_direction.iter_mut() {
+                    *param *= -1.0;
+                }
+
+                let mut applied_lr = 0.0;
+                let mut highest_curvature_failure = 0.0;
+                let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
+                let mut new_test = 0.0;
+                let mut local_slope = 0.0;
+                for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
+                    local_slope += param_search_amount * param_der;
+                }
+                let tolerable_local_slope = slope_tolerance_parameter * local_slope;
+                let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+                for _ in 0..max_line_search_iterations {
+                    let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
+                    self.add_flat_gradient(&search_direction, next_lr-applied_lr);
+                    applied_lr = next_lr;
+                    new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                    println!("LR: {} \tTest: {}",applied_lr,new_test);
+                    if new_test > previous_test + applied_lr * tolerable_local_slope {
+                        lowest_improvement_failure = applied_lr;
+                        continue
+                    }
+                    next_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
+                    let mut new_local_slope = 0.0;
+                    for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
+                        new_local_slope += param_search_amount * new_param_der;
+                    }
+                    if new_local_slope.abs() > tolerable_non_local_slope {
+                        highest_curvature_failure = applied_lr;
+                        continue
+                    }
+                    break
+                }
+                previous_test = new_test;
+                if p_mem.len() == iteration_memory {
+                    network_change_mem.pop_front();
+                    gradient_change_mem.pop_front();
+                    p_mem.pop_front();
+                }
+                for param in search_direction.iter_mut() {
+                    *param *= applied_lr;
+                }
+                let mut gradient_change = Vec::new();
+                for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
+                    gradient_change.push(next_param_der-param_der);
+                }
+                let mut reciprocal_p = 0.0;
+                for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
+                    reciprocal_p += param_search_amount * param_der_change;
+                }
+                network_change_mem.push_back(search_direction);
+                gradient_change_mem.push_back(gradient_change);
+                p_mem.push_back(1.0/reciprocal_p);
+            }
+        }
+    
+        fn stochastic_multithreaded_l_bfgs_train(
+            &mut self,
+            training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+            num_partitions: f64,
+            batch_size: usize,
+            iteration_memory: usize,
+            first_checked_rate: f64,
+            improvement_vs_curvature_bias: f64,
+            slope_tolerance_parameter: f64,
+            curvature_tolerance_parameter: f64,
+            max_line_search_iterations: u32,
+            max_iterations: u32
+        ) {
+            let partitioned_training_data = partition_data(training_data, num_partitions);
+
+            let mut network_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
+            let mut gradient_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
+            let mut p_mem = VecDeque::with_capacity(iteration_memory);
+
+            let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+            let current_gradient = <Self>::flatten_gradient(self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size));
+            let mut search_direction = Vec::with_capacity(current_gradient.len());
+            let mut next_gradient = Vec::new();
+            for param_der in current_gradient.iter() {
+                search_direction.push(-param_der);
+            }
+            let mut applied_lr = 0.0;
+            let mut highest_curvature_failure = 0.0;
+            let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
+            let mut new_test = 0.0;
+            let mut local_slope = 0.0;
+            for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
+                local_slope += param_search_amount * param_der;
+            }
+            let tolerable_local_slope = slope_tolerance_parameter * local_slope;
+            let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+            for _ in 0..max_line_search_iterations {
+                let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
+                self.add_flat_gradient(&search_direction, next_lr-applied_lr);
+                applied_lr = next_lr;
+                new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                println!("LR: {} \tTest: {}",applied_lr,new_test);
+                if new_test > previous_test + applied_lr * tolerable_local_slope {
+                    lowest_improvement_failure = applied_lr;
+                    continue
+                }
+                next_gradient = <Self>::flatten_gradient(self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size));
+                let mut new_local_slope = 0.0;
+                for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
+                    new_local_slope += param_search_amount * new_param_der;
+                }
+                if new_local_slope.abs() > tolerable_non_local_slope {
+                    highest_curvature_failure = applied_lr;
+                    continue
+                }
+                break
+            }
+            previous_test = new_test;
+
+            for param in search_direction.iter_mut() {
+                *param *= applied_lr;
+            }
+            let mut gradient_change = Vec::new();
+            for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
+                gradient_change.push(next_param_der-param_der);
+            }
+            let mut reciprocal_p = 0.0;
+            for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
+                reciprocal_p += param_search_amount * param_der_change;
+            }
+            network_change_mem.push_back(search_direction);
+            gradient_change_mem.push_back(gradient_change);
+            p_mem.push_back(1.0/reciprocal_p);
+            
+            for _ in 1..max_iterations {
+                let current_gradient: Vec<f64> = next_gradient;
+                next_gradient = Vec::with_capacity(0);//cause rust doesnt want to skip the reinitialization
+                let mut search_direction = current_gradient.clone();
+                
+                let mut alpha_mem = Vec::new();
+                for (network_change,(gradient_change,p)) in (
+                network_change_mem.iter().zip(
+                gradient_change_mem.iter().zip(
+                p_mem.iter()))
+                ).rev() {
+                    let mut alpha = 0.0;
+                    for (param_change,param_search_amount) in network_change.iter().zip(search_direction.iter()) {
+                        alpha += param_change * param_search_amount;
+                    }
+                    alpha *= p;
+                    for (param_search_amount,param_der_change) in search_direction.iter_mut().zip(gradient_change.iter()) {
+                        *param_search_amount -= alpha * param_der_change;
+                    }
+                    alpha_mem.push(alpha);
+                }
+
+                let mut mult_numerator = 0.0;
+                let mut mult_denominator = 0.0;
+                for (param_change,param_der_change) in network_change_mem[network_change_mem.len()-1].iter().zip(gradient_change_mem[gradient_change_mem.len()-1].iter()) {
+                    mult_numerator += param_change * param_der_change;
+                    mult_denominator += param_der_change * param_der_change;
+                }
+                let mult = mult_numerator/mult_denominator;
+                for param_search_amount in search_direction.iter_mut() {
+                    *param_search_amount *= mult;
+                }
+
+                for (network_change,(gradient_change,(p,alpha))) in 
+                network_change_mem.iter().zip(
+                gradient_change_mem.iter().zip(
+                p_mem.iter().zip(
+                alpha_mem.iter().rev()
+                ))) {
+                    let mut beta = 0.0;
+                    for (param_der_change,param_search_amount) in gradient_change.iter().zip(search_direction.iter()) {
+                        beta += param_der_change * param_search_amount;
+                    }
+                    let alpha_beta_dif = alpha - beta * p;
+                    for (param_search_amount,param_change) in search_direction.iter_mut().zip(network_change.iter()) {
+                        *param_search_amount += param_change * alpha_beta_dif;
+                    }
+                }
+                for param in search_direction.iter_mut() {
+                    *param *= -1.0;
+                }
+
+                let mut applied_lr = 0.0;
+                let mut highest_curvature_failure = 0.0;
+                let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
+                let mut new_test = 0.0;
+                let mut local_slope = 0.0;
+                for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
+                    local_slope += param_search_amount * param_der;
+                }
+                let tolerable_local_slope = slope_tolerance_parameter * local_slope;
+                let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+                for _ in 0..max_line_search_iterations {
+                    let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
+                    self.add_flat_gradient(&search_direction, next_lr-applied_lr);
+                    applied_lr = next_lr;
+                    new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
+                    println!("LR: {} \tTest: {}",applied_lr,new_test);
+                    if new_test > previous_test + applied_lr * tolerable_local_slope {
+                        lowest_improvement_failure = applied_lr;
+                        continue
+                    }
+                    next_gradient = <Self>::flatten_gradient(self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size));
+                    let mut new_local_slope = 0.0;
+                    for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
+                        new_local_slope += param_search_amount * new_param_der;
+                    }
+                    if new_local_slope.abs() > tolerable_non_local_slope {
+                        highest_curvature_failure = applied_lr;
+                        continue
+                    }
+                    break
+                }
+                previous_test = new_test;
+                if p_mem.len() == iteration_memory {
+                    network_change_mem.pop_front();
+                    gradient_change_mem.pop_front();
+                    p_mem.pop_front();
+                }
+                for param in search_direction.iter_mut() {
+                    *param *= applied_lr;
+                }
+                let mut gradient_change = Vec::new();
+                for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
+                    gradient_change.push(next_param_der-param_der);
+                }
+                let mut reciprocal_p = 0.0;
+                for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
+                    reciprocal_p += param_search_amount * param_der_change;
+                }
+                network_change_mem.push_back(search_direction);
+                gradient_change_mem.push_back(gradient_change);
+                p_mem.push_back(1.0/reciprocal_p);
+            }
         }
     }
 
@@ -1938,6 +2361,4 @@ mod tests {
             }
         }
     }
-
-    
 }
