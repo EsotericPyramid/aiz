@@ -2288,6 +2288,459 @@ pub mod aiz_unstable {
 
 
     }
+
+    pub mod splice{
+        use super::*;
+
+        //completely seperate from network in order to be object-safe, aka avoids the gradient type at all costs
+        pub trait OSSpliceableNetwork: Send + Sync {
+            type SRunInfo;
+
+            fn s_run(&self, inputs: &[f64]) -> Vec<f64>;
+            fn s_special_run(&self, inputs: &[f64]) -> (Vec<f64>,Self::SRunInfo);
+            fn s_full_der_run(&self, output_node_ders: &[f64],s_run_info: Self::SRunInfo) -> (Vec<f64>, Vec<f64>); //The second one is a gradient
+            fn s_der_run(&self, output_node_ders: &[f64],s_run_info: Self::SRunInfo) -> Vec<f64>; //just the gradient, no input node ders
+            fn s_build_zero_gradient(&self) -> Vec<f64>;
+            fn s_substract_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64);
+            fn s_add_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64);
+            fn s_get_inputs(&self) -> usize;
+            fn s_get_outputs(&self) -> usize;
+        }
+
+        pub trait SpliceableNetwork: Network {
+            type SRunInfo;
+
+            fn special_run(&self, inputs: &[f64]) -> (Vec<f64>,Self::SRunInfo);
+            fn full_der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> (Vec<f64>, Self::Gradient);
+            fn der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> Self::Gradient;
+            fn get_inputs(&self) -> usize;
+            fn get_outputs(&self) -> usize;
+        }
+
+        impl<T: SpliceableNetwork + FlattenableGradient> OSSpliceableNetwork for T {
+            type SRunInfo = Box<<T as SpliceableNetwork>::SRunInfo>;
+
+            fn s_run(&self, inputs: &[f64]) -> Vec<f64> {
+                self.run(inputs)
+            }
+            fn s_special_run(&self, inputs: &[f64]) -> (Vec<f64>,Self::SRunInfo) {
+                let (output,s_run_info) = self.special_run(inputs);
+                (output,Box::new(s_run_info))
+            }
+            fn s_full_der_run(&self, output_node_ders: &[f64],s_run_info: Self::SRunInfo) -> (Vec<f64>, Vec<f64>) {
+                let (output, gradient) = self.full_der_run(output_node_ders, *s_run_info);
+                (output,<Self>::flatten_gradient(gradient))
+            }
+            fn s_der_run(&self, output_node_ders: &[f64],s_run_info: Self::SRunInfo) -> Vec<f64> {
+                <Self>::flatten_gradient(self.der_run(output_node_ders,*s_run_info))
+            }
+            fn s_build_zero_gradient(&self) -> Vec<f64> {
+                <Self>::build_zero_flat_gradient(&self)
+            }
+            fn s_substract_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64) {
+                self.subtract_flat_gradient(gradient, learning_rate)
+            }
+            fn s_add_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64) {
+                self.add_flat_gradient(gradient, learning_rate)
+            }
+            fn s_get_inputs(&self) -> usize {
+                self.get_inputs()
+            }
+            fn s_get_outputs(&self) -> usize {
+                self.get_outputs()
+            }
+        }
+
+        impl SpliceableNetwork for MultiLayerPerceptron {
+            type SRunInfo = (Vec<Vec<f64>>,Vec<Vec<f64>>);
+
+            fn special_run(&self, inputs: &[f64]) -> (Vec<f64>,Self::SRunInfo) {
+                let mut network_pre_activations = Vec::with_capacity(self.node_layout.len()-1);
+                let mut network_activations = Vec::with_capacity(self.node_layout.len());
+                network_activations.push(inputs.to_vec()); //remove this is possible
+                let mut layer_activations = Vec::with_capacity(self.node_layout[1]);
+                let mut layer_pre_activations = Vec::with_capacity(self.node_layout[1]);
+                for (node_bias,node_weights) in self.biases[0].iter().zip(self.weights[0].iter()) {
+                    let mut node_val_before_activation_fn = *node_bias;
+                    for (weight,previous_node_activation) in node_weights.iter().zip(inputs.iter()) {
+                        node_val_before_activation_fn += weight*previous_node_activation;
+                    }
+                    layer_pre_activations.push(node_val_before_activation_fn);
+                    layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
+                }
+                for (layer_biases,layer_weights) in self.biases[1..self.biases.len()].iter().zip(self.weights[1..self.weights.len()].iter()) {
+                    let mut new_layer_activations = Vec::with_capacity(layer_biases.len());
+                    let mut new_layer_pre_activations = Vec::with_capacity(layer_biases.len());
+                    for (node_bias,node_weights) in layer_biases.iter().zip(layer_weights.iter()) {
+                        let mut node_val_before_activation_fn = *node_bias;
+                        for (weight,previous_node_activation) in node_weights.iter().zip(layer_activations.iter()) {
+                            node_val_before_activation_fn += weight*previous_node_activation;
+                        }
+                        new_layer_pre_activations.push(node_val_before_activation_fn);
+                        new_layer_activations.push((self.activation_fn)(node_val_before_activation_fn));
+                    }
+                    network_pre_activations.push(layer_pre_activations);
+                    layer_pre_activations = new_layer_pre_activations;
+                    network_activations.push(layer_activations);
+                    layer_activations = new_layer_activations;
+                }
+                network_pre_activations.push(layer_pre_activations);
+                //last activation layer skipped so it is usable as output
+    
+                (layer_activations,(network_activations,network_pre_activations))
+            }
+
+            fn full_der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> (Vec<f64>, Self::Gradient) {
+                let mut biases_gradient = Vec::with_capacity(self.node_layout.len());
+                let mut weights_gradient = Vec::with_capacity(self.node_layout.len());
+                
+                let (network_activations,network_pre_activations) = s_run_info;
+                //last layer specific calculations
+                let mut last_layer_biases_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-1]);
+                let mut last_layer_weights_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-1]);
+                for (pre_activation,output_node_der) in 
+                network_pre_activations[network_pre_activations.len()-1].iter().zip(
+                output_node_ders.iter()) {
+                    let current_node_derivative = output_node_der*(self.derivative_activation_fn)(*pre_activation);
+                    last_layer_biases_gradient.push(current_node_derivative);
+                    let mut node_weights_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-2]);
+                    for previous_node_activation in network_activations[network_activations.len()-1].iter() {
+                        node_weights_gradient.push(previous_node_activation*current_node_derivative);
+                    }
+                    last_layer_weights_gradient.push(node_weights_gradient);
+                }
+                biases_gradient.push(last_layer_biases_gradient);
+                weights_gradient.push(last_layer_weights_gradient);
+                //All other layer calculations
+                for (forward_layer_weights,(current_pre_activations,previous_activations)) in 
+                self.weights.iter().rev().zip(
+                network_pre_activations[0..network_pre_activations.len()-1].iter().rev().zip(
+                network_activations[0..network_activations.len()-1].iter().rev())) {
+                    let mut layer_biases_gradient = Vec::with_capacity(current_pre_activations.len());
+                    let mut layer_weights_gradient = Vec::with_capacity(current_pre_activations.len());
+                    for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).iter().zip(current_pre_activations.iter()) {
+                        let mut new_node_derivative = 0.0;
+                        for (weight,forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
+                            new_node_derivative += *weight * forward_derivative;
+                        }
+                        new_node_derivative *= (self.derivative_activation_fn)(*node_pre_activation);
+                        layer_biases_gradient.push(new_node_derivative);
+                        let mut node_weights_gradients = Vec::with_capacity(previous_activations.len());
+                        for previous_node_activation in previous_activations {
+                            node_weights_gradients.push(previous_node_activation*new_node_derivative)
+                        }
+                        layer_weights_gradient.push(node_weights_gradients);
+                    }
+                    biases_gradient.push(layer_biases_gradient);
+                    weights_gradient.push(layer_weights_gradient);
+                }
+
+                let mut input_node_ders = Vec::with_capacity(self.node_layout[0]);
+                for input_node_weights in transpose_matrix(&self.weights[0]).iter() {
+                    let mut new_node_der = 0.0;
+                    for (weight, forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {
+                        new_node_der += *weight * forward_derivative;
+                    }
+                    input_node_ders.push(new_node_der);
+                }
+
+                biases_gradient = biases_gradient.into_iter().rev().collect();
+                weights_gradient = weights_gradient.into_iter().rev().collect();
+
+                (input_node_ders,(biases_gradient,weights_gradient))
+            }
+
+            fn der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> Self::Gradient {
+                let mut biases_gradient = Vec::with_capacity(self.node_layout.len());
+                let mut weights_gradient = Vec::with_capacity(self.node_layout.len());
+                
+                let (network_activations,network_pre_activations) = s_run_info;
+                //last layer specific calculations
+                let mut last_layer_biases_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-1]);
+                let mut last_layer_weights_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-1]);
+                for (pre_activation,output_node_der) in 
+                network_pre_activations[network_pre_activations.len()-1].iter().zip(
+                output_node_ders.iter()) {
+                    let current_node_derivative = output_node_der*(self.derivative_activation_fn)(*pre_activation);
+                    last_layer_biases_gradient.push(current_node_derivative);
+                    let mut node_weights_gradient = Vec::with_capacity(self.node_layout[self.node_layout.len()-2]);
+                    for previous_node_activation in network_activations[network_activations.len()-1].iter() {
+                        node_weights_gradient.push(previous_node_activation*current_node_derivative);
+                    }
+                    last_layer_weights_gradient.push(node_weights_gradient);
+                }
+                biases_gradient.push(last_layer_biases_gradient);
+                weights_gradient.push(last_layer_weights_gradient);
+                //All other layer calculations
+                for (forward_layer_weights,(current_pre_activations,previous_activations)) in 
+                self.weights.iter().rev().zip(
+                network_pre_activations[0..network_pre_activations.len()-1].iter().rev().zip(
+                network_activations[0..network_activations.len()-1].iter().rev())) {
+                    let mut layer_biases_gradient = Vec::with_capacity(current_pre_activations.len());
+                    let mut layer_weights_gradient = Vec::with_capacity(current_pre_activations.len());
+                    for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).iter().zip(current_pre_activations.iter()) {
+                        let mut new_node_derivative = 0.0;
+                        for (weight,forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
+                            new_node_derivative += *weight * forward_derivative;
+                        }
+                        new_node_derivative *= (self.derivative_activation_fn)(*node_pre_activation);
+                        layer_biases_gradient.push(new_node_derivative);
+                        let mut node_weights_gradients = Vec::with_capacity(previous_activations.len());
+                        for previous_node_activation in previous_activations {
+                            node_weights_gradients.push(previous_node_activation*new_node_derivative)
+                        }
+                        layer_weights_gradient.push(node_weights_gradients);
+                    }
+                    biases_gradient.push(layer_biases_gradient);
+                    weights_gradient.push(layer_weights_gradient);
+                }
+                biases_gradient = biases_gradient.into_iter().rev().collect();
+                weights_gradient = weights_gradient.into_iter().rev().collect();
+
+                (biases_gradient,weights_gradient)
+            }
+
+            fn get_inputs(&self) -> usize {
+                self.node_layout[0]
+            }
+            fn get_outputs(&self) -> usize {
+                self.node_layout[self.node_layout.len()-1]
+            }
+        }
+
+        pub struct CompositeNetwork {
+            network_layout: Vec<Vec<usize>>,
+            networks: Vec<Box<dyn OSSpliceableNetwork<SRunInfo = Box<dyn std::any::Any>>>>
+        }
+
+        impl CompositeNetwork {
+            pub fn new(network_layout: Vec<Vec<usize>>,networks: Vec<Box<dyn OSSpliceableNetwork<SRunInfo = Box<dyn std::any::Any>>>>) -> Self{
+                CompositeNetwork {
+                    network_layout: network_layout,
+                    networks: networks
+                }
+            }
+            pub fn get_networks(&self) -> &Vec<Box<dyn OSSpliceableNetwork<SRunInfo = Box<dyn std::any::Any>>>> {
+                &self.networks
+            }
+            pub fn get_layout(&self) -> &Vec<Vec<usize>> {
+                &self.network_layout
+            }
+            pub fn unwrap_network(self) -> (Vec<Vec<usize>>,Vec<Box<dyn OSSpliceableNetwork<SRunInfo = Box<dyn std::any::Any>>>>) {
+                (self.network_layout,self.networks)
+            }
+        }
+
+        impl Gradient for Vec<Vec<f64>> { //CompositeNetwork
+            fn add(&mut self,other: Self) {
+                for (self_network,other_network) in self.iter_mut().zip(other.into_iter()) {
+                    for (self_param,other_param) in self_network.iter_mut().zip(other_network.into_iter()) {
+                        *self_param += other_param;
+                    }
+                }
+            }
+            fn div(&mut self,divisor: f64) {
+                for network in self.iter_mut() {
+                    for param in network {
+                        *param /= divisor;
+                    }
+                }
+            }
+            fn mult(&mut self,factor: f64) {
+                for network in self.iter_mut() {
+                    for param in network {
+                        *param *= factor;
+                    }
+                }
+            }
+            fn dot_product(&self,other: &Self) -> f64 {
+                let mut output = 0.0;
+                for (self_network,other_network) in self.iter().zip(other.iter()) {
+                    for (self_param,other_param) in self_network.iter().zip(other_network.iter()) {
+                        output += self_param * other_param;
+                    }
+                }
+                output
+            }
+        }
+
+        impl Network for CompositeNetwork {
+            type Gradient = Vec<Vec<f64>>;
+
+            fn run(&self,inputs: &[f64]) -> Vec<f64> { 
+                //first layer
+                let mut current_network_first_input_index = 0;
+                let mut layer_outputs = Vec::new();
+                for network_index in self.network_layout[0].iter() {
+                    for output in self.networks[*network_index].s_run(&inputs[current_network_first_input_index..current_network_first_input_index+self.networks[*network_index].s_get_inputs()]).into_iter() {
+                        layer_outputs.push(output);
+                    }
+                    current_network_first_input_index += self.networks[*network_index].s_get_inputs();
+                }
+                //other layers
+                for layer_network_indices in &self.network_layout[1..self.network_layout.len()] {
+                    current_network_first_input_index = 0;
+                    let mut new_layer_outputs = Vec::new();
+                    for network_index in layer_network_indices.iter() {
+                        for output in self.networks[*network_index].s_run(&layer_outputs[current_network_first_input_index..current_network_first_input_index+self.networks[*network_index].s_get_inputs()]).into_iter() {
+                            new_layer_outputs.push(output);
+                        }
+                        current_network_first_input_index += self.networks[*network_index].s_get_inputs();
+                    }
+                    layer_outputs = new_layer_outputs;
+                }
+                layer_outputs
+            }
+
+            fn subtract_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+                for (network,network_gradient) in self.networks.iter_mut().zip(gradient.iter()) {
+                    network.s_substract_gradient(network_gradient, learning_rate);
+                }
+            }
+
+            fn add_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+                for (network,network_gradient) in self.networks.iter_mut().zip(gradient.iter()) {
+                    network.s_add_gradient(network_gradient, learning_rate);
+                }
+            }
+
+            fn build_zero_gradient(&self) -> Self::Gradient {
+                let mut output = Vec::new(); 
+                for network in self.networks.iter() {
+                    output.push(network.s_build_zero_gradient());
+                }
+                output
+            }
+
+            fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient {
+                let mut network_s_run_infos = Vec::new();
+                
+                //first layer
+                let mut layer_network_s_run_infos = Vec::new();
+                let mut current_network_first_input_index = 0;
+                let mut layer_outputs = Vec::new();
+                for network_index in self.network_layout[0].iter() {
+                    let (outputs,s_run_info) = self.networks[*network_index].s_special_run(&training_in[current_network_first_input_index..current_network_first_input_index+self.networks[*network_index].s_get_inputs()]);
+                    layer_network_s_run_infos.push(s_run_info);
+                    for output in outputs {
+                        layer_outputs.push(output);
+                    }
+                    current_network_first_input_index += self.networks[*network_index].s_get_inputs();
+                }
+                network_s_run_infos.push(layer_network_s_run_infos);
+                //other layers
+                for layer_network_indices in &self.network_layout[1..self.network_layout.len()] {
+                    layer_network_s_run_infos = Vec::new();
+                    current_network_first_input_index = 0;
+                    let mut new_layer_outputs = Vec::new();
+                    for network_index in layer_network_indices.iter() {
+                        let (outputs,s_run_info) = self.networks[*network_index].s_special_run(&layer_outputs[current_network_first_input_index..current_network_first_input_index+self.networks[*network_index].s_get_inputs()]);
+                        layer_network_s_run_infos.push(s_run_info);
+                        for output in outputs {
+                            new_layer_outputs.push(output);
+                        }
+                        current_network_first_input_index += self.networks[*network_index].s_get_inputs();
+                    }
+                    layer_outputs = new_layer_outputs;
+                    network_s_run_infos.push(layer_network_s_run_infos);
+                }
+                let mut layer_node_ders = Vec::new();
+                for (real_val,expected_val) in layer_outputs.into_iter().zip(training_out.iter()) {
+                    layer_node_ders.push(2.0*(real_val-*expected_val))
+                }
+                let mut network_gradients = Vec::new();
+                for network in self.networks.iter() {
+                    network_gradients.push(network.s_build_zero_gradient());
+                }
+
+                let mut layer_index = self.network_layout.len();
+                for (layer_network_indices,layer_network_s_run_infos) in self.network_layout.iter().zip(network_s_run_infos.into_iter()).rev() {
+                    if layer_index != 0 {
+                        let mut current_network_first_output_index = 0;
+                        let mut next_layer_node_ders = Vec::new();
+                        for (network_index,network_s_run_info) in layer_network_indices.iter().zip(layer_network_s_run_infos.into_iter()) {
+                            let (input_node_ders, gradient) = self.networks[*network_index].s_full_der_run(&layer_node_ders[current_network_first_output_index..current_network_first_output_index+self.networks[*network_index].s_get_outputs()], network_s_run_info);
+                            for (current_param,new_param) in network_gradients[*network_index].iter_mut().zip(gradient.into_iter()) {
+                                *current_param += new_param;
+                            }
+                            for der in input_node_ders {
+                                next_layer_node_ders.push(der);
+                            }
+                            current_network_first_output_index += self.networks[*network_index].s_get_outputs();
+                        }
+                        layer_node_ders = next_layer_node_ders;
+                        layer_index -= 1;
+                    }
+                    else {
+                        let mut current_network_first_output_index = 0;
+                        for (network_index,network_s_run_info) in layer_network_indices.iter().zip(layer_network_s_run_infos.into_iter()) {
+                            let gradient = self.networks[*network_index].s_der_run(&layer_node_ders[current_network_first_output_index..current_network_first_output_index+self.networks[*network_index].s_get_outputs()], network_s_run_info);
+                            for (current_param,new_param) in network_gradients[*network_index].iter_mut().zip(gradient.into_iter()) {
+                                *current_param += new_param;
+                            }
+                            current_network_first_output_index += self.networks[*network_index].s_get_outputs();
+                        }
+                    }
+                }
+
+                network_gradients
+            }
+        }
+        pub struct BiNetwork<F: SpliceableNetwork,G: SpliceableNetwork> {
+            pub left_network: F,
+            pub right_network: G,
+        }
+        
+        impl<LG: Gradient, RG: Gradient> Gradient for (LG,RG) {
+            fn add(&mut self,other: Self) {
+                self.0.add(other.0);
+                self.1.add(other.1);
+            }
+            fn div(&mut self,divisor: f64) {
+                self.0.div(divisor);
+                self.1.div(divisor);
+            }
+            fn mult(&mut self,factor: f64) {
+                self.0.mult(factor);
+                self.1.mult(factor);
+            }
+            fn dot_product(&self,other: &Self) -> f64 {
+                self.0.dot_product(&other.0) + self.1.dot_product(&other.1)
+            }
+        }
+
+        impl<F: SpliceableNetwork,G: SpliceableNetwork> Network for BiNetwork<F,G> {
+            type Gradient = (F::Gradient,G::Gradient);
+
+            fn run(&self,inputs: &[f64]) -> Vec<f64> {
+                self.right_network.run(&self.left_network.run(inputs))
+            }
+            fn subtract_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+                self.left_network.subtract_gradient(&gradient.0, learning_rate);
+                self.right_network.subtract_gradient(&gradient.1, learning_rate);
+            }
+            fn add_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+                self.left_network.add_gradient(&gradient.0, learning_rate);
+                self.right_network.add_gradient(&gradient.1, learning_rate);
+            }
+            fn build_zero_gradient(&self) -> Self::Gradient {
+                (self.left_network.build_zero_gradient(),self.right_network.build_zero_gradient())
+            }
+            fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient {
+                let (output,left_s_run_info) = self.left_network.special_run(training_in);
+                let (mut output,right_s_run_info) = self.right_network.special_run(&output);
+                for (real_val,expected_val) in output.iter_mut().zip(training_out.iter()) {
+                    *real_val -= expected_val; 
+                    *real_val *= 2.0; //jank in place calculations
+                }
+                let (node_ders,right_gradient) = self.right_network.full_der_run(&output, right_s_run_info);
+                let left_gradient = self.left_network.der_run(&node_ders, left_s_run_info);
+                (left_gradient,right_gradient)
+            }
+        }
+    
+    
+    }
 }
 
 #[cfg(test)]
