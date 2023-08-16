@@ -2302,6 +2302,33 @@ pub mod aiz_unstable {
             fn der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> Self::Gradient;
             fn get_inputs(&self) -> usize;
             fn get_outputs(&self) -> usize;
+
+            fn chain_run(&self, input_iterator: &mut ChainOutput) -> ChainOutput {
+                ChainOutput::Tail(self.run(&input_iterator.take(self.get_inputs()).collect::<Vec<f64>>()).into_iter())
+            }
+            fn chain_special_run(&self, input_iterator: &mut ChainOutput) -> (ChainOutput,Self::SRunInfo) {
+                let (output,info) = self.special_run(&input_iterator.take(self.get_inputs()).collect::<Vec<f64>>());
+                (ChainOutput::Tail(output.into_iter()),info)
+            }
+            fn chain_full_der_run(&self, output_node_der_iterator: &mut ChainOutput, s_run_info: Self::SRunInfo) -> (ChainOutput,Self::Gradient) {
+                let (output, gradient) = self.full_der_run(&output_node_der_iterator.take(self.get_outputs()).collect::<Vec<f64>>(),s_run_info);
+                (ChainOutput::Tail(output.into_iter()),gradient)
+            }
+            fn chain_der_run(&self,output_node_der_iterator: &mut ChainOutput,s_run_info: Self::SRunInfo) -> Self::Gradient {
+                self.der_run(&output_node_der_iterator.take(self.get_outputs()).collect::<Vec<f64>>(),s_run_info)
+            }
+
+            fn chain_out_only_run(&self, inputs: &[f64]) -> ChainOutput {
+                ChainOutput::Tail(self.run(inputs).into_iter())
+            }
+            fn chain_out_only_special_run(&self, inputs: &[f64]) -> (ChainOutput,Self::SRunInfo) {
+                let (output,info) = self.special_run(inputs);
+                (ChainOutput::Tail(output.into_iter()),info)
+            }
+            fn chain_out_only_full_der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> (ChainOutput,Self::Gradient) {
+                let (output, gradient) = self.full_der_run(output_node_ders,s_run_info);
+                (ChainOutput::Tail(output.into_iter()),gradient)
+            }
         }
 
         impl SpliceableNetwork for MultiLayerPerceptron {
@@ -2461,25 +2488,62 @@ pub mod aiz_unstable {
             }
         }
 
-        pub struct ObjectSafeSpliceableNetworkWrapper<T: SpliceableNetwork + FlattenableGradient> {
-            network: T,
+        pub trait ObjectSafeSpliceableNetwork: Send + Sync {
+            fn os_run(&self, inputs: &[f64]) -> Vec<f64>;
+            fn os_subtract_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64);
+            fn os_add_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64);
+            fn os_build_zero_gradient(&self) -> Vec<f64>;
+            fn os_get_inputs(&self) -> usize;
+            fn os_get_outputs(&self) -> usize;
+            fn get_wrapper(&self) -> Box<dyn ObjectSafeWrappedSpliceableNetwork + '_>;
+        }
+
+        impl<T: SpliceableNetwork + FlattenableGradient> ObjectSafeSpliceableNetwork for T {
+            fn os_run(&self, inputs: &[f64]) -> Vec<f64> {
+                self.run(inputs)
+            }
+            fn os_subtract_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64) {
+                self.subtract_flat_gradient(&gradient, learning_rate);
+            }
+            fn os_add_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64) {
+                self.add_flat_gradient(gradient, learning_rate);
+            }
+            fn os_build_zero_gradient(&self) -> Vec<f64> {
+                self.build_zero_flat_gradient()
+            }
+            fn os_get_inputs(&self) -> usize {
+                self.get_inputs()
+            }
+            fn os_get_outputs(&self) -> usize {
+                self.get_outputs()
+            }
+            fn get_wrapper(&self) -> Box<dyn ObjectSafeWrappedSpliceableNetwork + '_> {
+                Box::new(ObjectSafeSpliceableNetworkWrapper {
+                    network: self,
+                    stored_s_run_infos: Vec::new(),
+                    gradient: None
+                })
+            }
+        }
+
+        pub struct ObjectSafeSpliceableNetworkWrapper<'a,T: SpliceableNetwork + FlattenableGradient> {
+            network: &'a T,
             stored_s_run_infos: Vec<T::SRunInfo>,
             gradient: Option<T::Gradient>
         }
 
-        pub trait ObjectSafeSpliceableNetwork: Send + Sync {
+        pub trait ObjectSafeWrappedSpliceableNetwork: Send + Sync {
             fn run(&self, inputs: &[f64]) -> Vec<f64>;
             fn special_run(&mut self, inputs: &[f64]) -> Vec<f64>;
             fn der_run(&mut self,output_node_ders: &[f64]);
             fn full_der_run(&mut self,output_node_ders: &[f64]) -> Vec<f64>;
             fn flush_gradient(&mut self) -> Vec<f64>;
-            fn add_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64);
-            fn subtract_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64);
+            fn build_zero_gradient(&self) -> Vec<f64>;
             fn get_inputs(&self) -> usize;
             fn get_outputs(&self) -> usize;
         }
 
-        impl<T: SpliceableNetwork + FlattenableGradient> ObjectSafeSpliceableNetwork for ObjectSafeSpliceableNetworkWrapper<T> {
+        impl<T: SpliceableNetwork + FlattenableGradient> ObjectSafeWrappedSpliceableNetwork for ObjectSafeSpliceableNetworkWrapper<'_,T> {
             fn run(&self, inputs: &[f64]) -> Vec<f64> {
                 self.network.run(inputs)
             }
@@ -2506,13 +2570,10 @@ pub mod aiz_unstable {
                 input_node_ders
             }
             fn flush_gradient(&mut self) -> Vec<f64> {
-                <T>::flatten_gradient(std::mem::replace(&mut self.gradient, None).unwrap())
+                <T>::flatten_gradient(std::mem::replace(&mut self.gradient, None).unwrap_or_else(|| {panic!("No gradient to Flush")}))
             }
-            fn add_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64) {
-                self.network.add_flat_gradient(&gradient, learning_rate)
-            }
-            fn subtract_gradient(&mut self, gradient: &Vec<f64>, learning_rate: f64) {
-                self.network.subtract_flat_gradient(&gradient, learning_rate)
+            fn build_zero_gradient(&self) -> Vec<f64> {
+                self.network.build_zero_flat_gradient()
             }
             fn get_inputs(&self) -> usize {
                 self.network.get_inputs()
@@ -2560,27 +2621,119 @@ pub mod aiz_unstable {
             networks: Vec<Box<dyn ObjectSafeSpliceableNetwork>>
         }
 
+        impl CompositeNetwork {
+            pub fn new(network_layout: Vec<Vec<usize>>,networks: Vec<Box<dyn ObjectSafeSpliceableNetwork>>) -> Self {
+                Self{
+                    network_layout: network_layout,
+                    networks: networks
+                }
+            }
+        }
+
         impl Network for CompositeNetwork {
             type Gradient = Vec<Vec<f64>>;
 
             fn run(&self,inputs: &[f64]) -> Vec<f64> {
-                todo!()
+                let mut layer_outputs = Vec::new();
+                let mut current_first_input_index = 0;
+                for network_index in self.network_layout[0].iter() {
+                    let current_net = &self.networks[*network_index];
+                    for output in current_net.os_run(&inputs[current_first_input_index..current_first_input_index+current_net.os_get_inputs()]) {
+                        layer_outputs.push(output);
+                    }
+                    current_first_input_index += current_net.os_get_inputs();
+                }
+                for layer_networks in self.network_layout.iter() {
+                    let mut next_layer_outputs = Vec::new();
+                    let mut current_first_input_index = 0;
+                    for network_index in layer_networks {
+                        let current_net = &self.networks[*network_index];
+                        for output in current_net.os_run(&layer_outputs[current_first_input_index..current_first_input_index+current_net.os_get_inputs()]) {
+                            next_layer_outputs.push(output);
+                        }
+                        current_first_input_index += current_net.os_get_inputs();
+                    }
+                    layer_outputs = next_layer_outputs;
+                }
+                layer_outputs
             }
             fn subtract_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
-                todo!()
+                for (network, network_gradient) in self.networks.iter_mut().zip(gradient.iter()) {
+                    network.os_subtract_gradient(network_gradient, learning_rate);
+                }
             }
             fn add_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
-                todo!()
+                for (network, network_gradient) in self.networks.iter_mut().zip(gradient.iter()) {
+                    network.os_add_gradient(network_gradient, learning_rate);
+                }
             }
             fn build_zero_gradient(&self) -> Self::Gradient {
-                todo!()
+                let mut output = Vec::new();
+                for network in self.networks.iter() {
+                    output.push(network.os_build_zero_gradient());
+                }
+                output
             }
             fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient {
-                todo!()
+                let mut network_wrappers = Vec::new();
+                for network in self.networks.iter() {
+                    network_wrappers.push(network.get_wrapper());
+                }
+                let mut layer_outputs = Vec::new();
+                let mut current_first_input_index = 0;
+                for network_index in self.network_layout[0].iter() {
+                    let current_net = &mut network_wrappers[*network_index];
+                    for output in current_net.special_run(&training_in[current_first_input_index..current_first_input_index+current_net.get_inputs()]) {
+                        layer_outputs.push(output);
+                    }
+                    current_first_input_index += current_net.get_inputs();
+                }
+                for layer_networks in self.network_layout[1..self.network_layout.len()].iter() {
+                    let mut next_layer_outputs = Vec::new();
+                    let mut current_first_input_index = 0;
+                    for network_index in layer_networks {
+                        let current_net = &mut network_wrappers[*network_index];
+                        for output in current_net.special_run(&layer_outputs[current_first_input_index..current_first_input_index+current_net.get_inputs()]) {
+                            next_layer_outputs.push(output);
+                        }
+                        current_first_input_index += current_net.get_inputs();
+                    }
+                    layer_outputs = next_layer_outputs;
+                }
+                for (real_val,expected_val) in layer_outputs.iter_mut().zip(training_out.iter()) {
+                    *real_val = 2.0*(*real_val-expected_val)
+                }
+                for layer_networks in self.network_layout[1..self.network_layout.len()].iter().rev() {
+                    let mut next_layer_node_ders = Vec::new();
+                    let mut current_last_der_index = layer_outputs.len(); //techinacally plus one
+                    for network_index in layer_networks.iter().rev() {
+                        let current_net = &mut network_wrappers[*network_index];
+                        next_layer_node_ders.push(current_net.full_der_run(&layer_outputs[current_last_der_index-current_net.get_outputs()..current_last_der_index]));
+                        current_last_der_index -= current_net.get_outputs();
+                    }
+                    layer_outputs = Vec::new();
+                    for network_input_ders in next_layer_node_ders.into_iter().rev() {
+                        for input_node_der in network_input_ders {
+                            layer_outputs.push(input_node_der);
+                        }
+                    }
+                }
+                let mut current_last_der_index = layer_outputs.len(); //see above
+                for network_index in self.network_layout[0].iter().rev() {
+                    let current_net = &mut network_wrappers[*network_index];
+                    current_net.der_run(&layer_outputs[current_last_der_index-current_net.get_outputs()..current_last_der_index]);
+                    current_last_der_index -= current_net.get_outputs();
+                }
+                let mut output_gradient = Vec::new();
+                for mut wrapper in network_wrappers {
+                    output_gradient.push(wrapper.flush_gradient());
+                }
+                output_gradient
+
             }
         }
 
-        pub struct BiNetwork<F: SpliceableNetwork,G: SpliceableNetwork> {
+        pub struct DualSequentialNetwork<F: SpliceableNetwork,G: SpliceableNetwork> {
             pub left_network: F,
             pub right_network: G,
         }
@@ -2603,11 +2756,12 @@ pub mod aiz_unstable {
             }
         }
 
-        impl<F: SpliceableNetwork,G: SpliceableNetwork> Network for BiNetwork<F,G> {
+        //should be using chain runs for better performance
+        impl<F: SpliceableNetwork,G: SpliceableNetwork> Network for DualSequentialNetwork<F,G> {
             type Gradient = (F::Gradient,G::Gradient);
 
             fn run(&self,inputs: &[f64]) -> Vec<f64> {
-                self.right_network.run(&self.left_network.run(inputs))
+                self.right_network.chain_run(&mut self.left_network.chain_out_only_run(inputs)).collect()
             }
             fn subtract_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
                 self.left_network.subtract_gradient(&gradient.0, learning_rate);
@@ -2621,28 +2775,175 @@ pub mod aiz_unstable {
                 (self.left_network.build_zero_gradient(),self.right_network.build_zero_gradient())
             }
             fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient {
-                let (output,left_s_run_info) = self.left_network.special_run(training_in);
-                let (mut output,right_s_run_info) = self.right_network.special_run(&output);
-                for (real_val,expected_val) in output.iter_mut().zip(training_out.iter()) {
-                    *real_val -= expected_val; 
-                    *real_val *= 2.0; //jank in place calculations
+                let (mut mid_outputs,left_info) = self.left_network.chain_out_only_special_run(training_in);
+                let (outputs,right_info) = self.right_network.chain_special_run(&mut mid_outputs);
+                let mut output_node_ders = Vec::new();
+                for (real_val,expected_val) in outputs.zip(training_out.iter()) {
+                    output_node_ders.push(2.0*(real_val-expected_val));
                 }
-                let (node_ders,right_gradient) = self.right_network.full_der_run(&output, right_s_run_info);
-                let left_gradient = self.left_network.der_run(&node_ders, left_s_run_info);
+                let (mut mid_node_ders,right_gradient) = self.right_network.chain_out_only_full_der_run(&output_node_ders, right_info);
+                let left_gradient = self.left_network.chain_der_run(&mut mid_node_ders, left_info);
                 (left_gradient,right_gradient)
+
             }
         }
     
-    
+        impl<F: SpliceableNetwork,G: SpliceableNetwork> SpliceableNetwork for DualSequentialNetwork<F,G>{
+            type SRunInfo = (F::SRunInfo,G::SRunInfo);
+
+            fn special_run(&self, inputs: &[f64]) -> (Vec<f64>,Self::SRunInfo) {
+                let (mid_outputs, left_info) = self.left_network.special_run(inputs);
+                let (outputs, right_info) = self.right_network.special_run(&mid_outputs);
+                (outputs,(left_info,right_info))
+            }
+            fn full_der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> (Vec<f64>, Self::Gradient) {
+                let (mid_node_ders, right_gradient) = self.right_network.full_der_run(output_node_ders, s_run_info.1);
+                let (input_node_ders, left_gradient) = self.left_network.full_der_run(&mid_node_ders, s_run_info.0);
+                (input_node_ders,(left_gradient,right_gradient))
+            }
+            fn der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> Self::Gradient {
+                let (mid_node_ders,right_gradient) = self.right_network.full_der_run(output_node_ders, s_run_info.1);
+                (self.left_network.der_run(&mid_node_ders, s_run_info.0),right_gradient)
+            }
+            fn get_inputs(&self) -> usize {
+                self.left_network.get_inputs()
+            }
+            fn get_outputs(&self) -> usize {
+                self.right_network.get_outputs()
+            }
+        }
+
+        pub enum ChainOutput {
+            Chain(Box<std::iter::Chain<ChainOutput,ChainOutput>>),
+            Tail(std::vec::IntoIter<f64>)
+        }
+
+        impl Iterator for ChainOutput {
+            type Item = f64;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                match self {
+                    Self::Chain(inner_iter)  => {inner_iter.next()}
+                    Self::Tail(inner_iter) => {inner_iter.next()}
+                }
+            }
+        }
+
+        pub struct DualParallelNetwork<F: SpliceableNetwork,G: SpliceableNetwork> {
+            pub top_network: F,
+            pub bottom_network: G
+        }
+
+        impl<F: SpliceableNetwork,G: SpliceableNetwork> Network for DualParallelNetwork<F,G> {
+            type Gradient = (F::Gradient,G::Gradient);
+
+            fn run(&self,inputs: &[f64]) -> Vec<f64> {
+                let top_chain_output = self.top_network.chain_out_only_run(&inputs[0..self.top_network.get_inputs()]);
+                let bottom_chain_output = self.bottom_network.chain_out_only_run(&inputs[self.top_network.get_inputs()..inputs.len()]);
+                top_chain_output.chain(bottom_chain_output).collect()
+            }
+            fn subtract_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+                self.top_network.subtract_gradient(&gradient.0, learning_rate);
+                self.bottom_network.subtract_gradient(&gradient.1, learning_rate);
+            }
+            fn add_gradient(&mut self,gradient: &Self::Gradient,learning_rate: f64) {
+                self.top_network.add_gradient(&gradient.0, learning_rate);
+                self.bottom_network.add_gradient(&gradient.1, learning_rate);
+            }
+            fn build_zero_gradient(&self) -> Self::Gradient {
+                let top_gradient = self.top_network.build_zero_gradient();
+                let bottom_gradient = self.bottom_network.build_zero_gradient();
+                (top_gradient,bottom_gradient)
+            }
+            fn one_example_back_propagation(&self,training_in: &[f64],training_out: &[f64]) -> Self::Gradient {
+                let (top_chain_output,top_info) = self.top_network.chain_out_only_special_run(&training_in[0..self.top_network.get_inputs()]);
+                let (bottom_chain_output,bottom_info) = self.bottom_network.chain_out_only_special_run(&training_in[self.top_network.get_inputs()..training_in.len()]);
+                let mut output_node_ders = Vec::new();
+                for (real_val,expected_val) in top_chain_output.chain(bottom_chain_output).zip(training_out.iter()) {
+                    output_node_ders.push(2.0*(real_val-expected_val));
+                }
+                let top_gradient = self.top_network.der_run(&output_node_ders[0..self.top_network.get_outputs()], top_info);
+                let bottom_gradient = self.bottom_network.der_run(&output_node_ders[self.top_network.get_outputs()..output_node_ders.len()], bottom_info);
+                (top_gradient,bottom_gradient)
+            }
+        }
+
+        impl<F: SpliceableNetwork,G: SpliceableNetwork> SpliceableNetwork for DualParallelNetwork<F,G> {
+            type SRunInfo = (F::SRunInfo,G::SRunInfo);
+
+            fn special_run(&self, inputs: &[f64]) -> (Vec<f64>,Self::SRunInfo) {
+                let (top_chain_output,top_info) = self.top_network.chain_out_only_special_run(&inputs[0..self.top_network.get_inputs()]);
+                let (bottom_chain_output, bottom_info) = self.bottom_network.chain_out_only_special_run(&inputs[self.top_network.get_inputs()..inputs.len()]);
+                (top_chain_output.chain(bottom_chain_output).collect(),(top_info,bottom_info))
+            }
+            fn full_der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> (Vec<f64>, Self::Gradient) {
+                let (top_chain_ders,top_gradient) = self.top_network.chain_out_only_full_der_run(&output_node_ders[0..self.top_network.get_outputs()], s_run_info.0);
+                let (bottom_chain_ders, bottom_gradient) = self.bottom_network.chain_out_only_full_der_run(&output_node_ders[self.top_network.get_outputs()..output_node_ders.len()], s_run_info.1);
+                (top_chain_ders.chain(bottom_chain_ders).collect(),(top_gradient,bottom_gradient))
+            }
+            fn der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> Self::Gradient {
+                let top_gradient = self.top_network.der_run(&output_node_ders[0..self.top_network.get_inputs()], s_run_info.0);
+                let bottom_gradient = self.bottom_network.der_run(&output_node_ders[self.top_network.get_inputs()..output_node_ders.len()],s_run_info.1);
+                (top_gradient,bottom_gradient)
+            }
+            fn get_inputs(&self) -> usize {
+                self.top_network.get_inputs() + self.bottom_network.get_inputs()
+            }
+            fn get_outputs(&self) -> usize {
+                self.top_network.get_outputs() + self.bottom_network.get_outputs()
+            }
+        
+            fn chain_run(&self, input_iterator: &mut ChainOutput) -> ChainOutput {
+                let top_chain_output = self.top_network.chain_run(input_iterator);
+                let bottom_chain_output = self.bottom_network.chain_run(input_iterator);
+                ChainOutput::Chain(Box::new(top_chain_output.chain(bottom_chain_output)))
+            }
+            fn chain_special_run(&self, input_iterator: &mut ChainOutput) -> (ChainOutput,Self::SRunInfo) {
+                let (top_chain_output,top_info) = self.top_network.chain_special_run(input_iterator);
+                let (bottom_chain_output,bottom_info) = self.bottom_network.chain_special_run(input_iterator);
+                (ChainOutput::Chain(Box::new(top_chain_output.chain(bottom_chain_output))),(top_info,bottom_info))
+            }
+            fn chain_full_der_run(&self, output_node_der_iterator: &mut ChainOutput, s_run_info: Self::SRunInfo) -> (ChainOutput,Self::Gradient) {
+                let (top_chain_ders,top_gradient) = self.top_network.chain_full_der_run(output_node_der_iterator, s_run_info.0);
+                let (bottom_chain_output,bottom_info) = self.bottom_network.chain_full_der_run(output_node_der_iterator, s_run_info.1);
+                (ChainOutput::Chain(Box::new(top_chain_ders.chain(bottom_chain_output))),(top_gradient,bottom_info))
+            }
+            fn chain_der_run(&self,output_node_der_iterator: &mut ChainOutput,s_run_info: Self::SRunInfo) -> Self::Gradient {
+                let top_gradient = self.top_network.chain_der_run(output_node_der_iterator, s_run_info.0);
+                let bottom_gradient = self.bottom_network.chain_der_run(output_node_der_iterator, s_run_info.1);
+                (top_gradient,bottom_gradient)
+            }
+
+            fn chain_out_only_run(&self, inputs: &[f64]) -> ChainOutput {
+                let top_chain_output = self.top_network.chain_out_only_run(&inputs[0..self.top_network.get_inputs()]);
+                let bottom_chain_output = self.bottom_network.chain_out_only_run(&inputs[self.top_network.get_inputs()..inputs.len()]);
+                ChainOutput::Chain(Box::new(top_chain_output.chain(bottom_chain_output)))
+            }
+            fn chain_out_only_special_run(&self, inputs: &[f64]) -> (ChainOutput,Self::SRunInfo) {
+                let (top_chain_output,top_info) = self.top_network.chain_out_only_special_run(&inputs[0..self.top_network.get_inputs()]);
+                let (bottom_chain_output,bottom_info) = self.bottom_network.chain_out_only_special_run(&inputs[self.top_network.get_inputs()..inputs.len()]);
+                (ChainOutput::Chain(Box::new(top_chain_output.chain(bottom_chain_output))),(top_info,bottom_info))
+            }
+            fn chain_out_only_full_der_run(&self, output_node_ders: &[f64], s_run_info: Self::SRunInfo) -> (ChainOutput,Self::Gradient) {
+                let (top_chain_ders,top_gradient) = self.top_network.chain_out_only_full_der_run(&output_node_ders[0..self.top_network.get_outputs()], s_run_info.0);
+                let (bottom_chain_output,bottom_info) = self.bottom_network.chain_out_only_full_der_run(&output_node_ders[self.top_network.get_outputs()..output_node_ders.len()], s_run_info.1);
+                (ChainOutput::Chain(Box::new(top_chain_ders.chain(bottom_chain_output))),(top_gradient,bottom_info))
+            }
+        }
     }
+
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::aiz_unstable::MultiLayerPerceptron;
+    use crate::aiz_unstable::SIGMOID;
+
     use super::aiz_unstable::NetworkInherentMethods;
     use super::aiz_unstable::Network;
     use super::*;
     use super::aiz_unstable::FileSupport;
+    use super::aiz_unstable::splice;
 
     #[test]
     fn mlp_into_and_from_bytes() {
@@ -2709,5 +3010,38 @@ mod tests {
         }
     }
 
-   
+    #[test]
+    //looks like it generally works
+    fn dual_nets_trial_by_fire() {
+        let mut network = splice::DualSequentialNetwork{
+            left_network: splice::DualParallelNetwork{
+                top_network: splice::DualParallelNetwork{
+                    top_network: MultiLayerPerceptron::new(vec![1,10,1],SIGMOID,1.0,1.0),
+                    bottom_network: MultiLayerPerceptron::new(vec![1,8,1],SIGMOID,1.0,1.0)
+                },
+                bottom_network: MultiLayerPerceptron::new(vec![1,12,1],SIGMOID,1.0,1.0)
+            },
+            right_network: splice::DualSequentialNetwork{
+                left_network: MultiLayerPerceptron::new(vec![3,20,10],SIGMOID,1.0,1.0),
+                right_network: MultiLayerPerceptron::new(vec![10,2,1],SIGMOID,1.0,1.0)
+            }
+        };
+        println!("TEST");
+        network.backtracking_line_search_train(&vec![(vec![1.0,0.0,0.5],vec![0.69]),(vec![0.75,0.5,0.25],vec![0.420])], 1.0, 0.5, 0.5, 0.0125, 100)
+    }
+
+    #[test]
+    //seems to work
+    fn composite_network_trial_by_fire() {
+        let networks: Vec<Box<dyn splice::ObjectSafeSpliceableNetwork>> = vec![
+            Box::new(MultiLayerPerceptron::new(vec![1,10,1],SIGMOID,1.0,1.0)),
+            Box::new(MultiLayerPerceptron::new(vec![1,8,2],SIGMOID,1.0,1.0)),
+            Box::new(MultiLayerPerceptron::new(vec![1,12,1],SIGMOID,1.0,1.0)),
+            Box::new(MultiLayerPerceptron::new(vec![2,20,10],SIGMOID,1.0,1.0)),
+            Box::new(MultiLayerPerceptron::new(vec![2,20,10],SIGMOID,1.0,1.0)),
+            Box::new(MultiLayerPerceptron::new(vec![20,2,1],SIGMOID,1.0,1.0))
+        ];
+        let mut network = splice::CompositeNetwork::new(vec![vec![0,1,2],vec![3,4],vec![5]],networks);
+        network.backtracking_line_search_train(&vec![(vec![1.0,0.0,0.5],vec![0.69]),(vec![0.75,0.5,0.25],vec![0.420])], 1.0, 0.5, 0.5, 0.0125, 100)
+    }
 }
