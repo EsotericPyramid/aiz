@@ -774,36 +774,35 @@ pub mod aiz_unstable {
     use std::thread; //multithreading
     
     
-    //could be a iterator, probably
-    //assumes the inner vectors are of equal length
-    pub fn transpose_matrix<T>(matrix: &Vec<Vec<T>>) -> Vec<Vec<&T>> {
-        let inner_matrix_len = matrix[0].len();
-        let mut output = Vec::with_capacity(inner_matrix_len);
-        for index in 0..inner_matrix_len {
-            let mut output_column = Vec::with_capacity(matrix.len());
-            for column in matrix {
-                output_column.push(&column[index]);
-            }
-            output.push(output_column);
-        }
-        output
+    
+    //assumes all the inner vectors are the same length
+    pub fn transpose_matrix<T>(matrix: &Vec<Vec<T>>) -> TransposedMatrix<'_,T> {
+        TransposedMatrix { matrix: matrix, row_index: 0 , matrix_dimension: matrix[0].len()}
     }
 
-    //same as above
-    pub fn transpose_owned_matrix<T>(matrix: Vec<Vec<T>>) -> Vec<Vec<T>> {
-        let inner_matrix_len = matrix[0].len();
-        let mut output_vec: Vec<Vec<T>> = Vec::with_capacity(inner_matrix_len);
-        for _ in 0..inner_matrix_len {
-            output_vec.push(Vec::with_capacity(matrix.len()))
-        }
-        for vec in matrix {
-            for (val, current_output_vec) in vec.into_iter().zip(output_vec.iter_mut()) {
-                current_output_vec.push(val)
-            }
-        }
-        output_vec
+    pub struct TransposedMatrix<'a,T>{
+        matrix: &'a Vec<Vec<T>>,
+        row_index: usize,
+        matrix_dimension: usize,
     }
 
+    impl<'a,T> Iterator for TransposedMatrix<'a,T> {
+        type Item = Vec<&'a T>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.row_index == self.matrix_dimension {
+                None
+            } else {
+                let mut output = Vec::with_capacity(self.matrix.len());
+                for vector in self.matrix {
+                    output.push(&vector[self.row_index])
+                }
+                self.row_index += 1;
+                Some(output)
+            }
+        }
+    }
+    
     //no randomness is implemented in this partitioning
     //this is because it is only intended to split up work
     //for multithreaded training and testing, so no randomness needed
@@ -821,7 +820,7 @@ pub mod aiz_unstable {
             } else {
                 current_partition_point += exact_partition_size;
                 partitioned_data.push(current_partition);
-                current_partition = Vec::new();
+                current_partition = Vec::with_capacity(exact_partition_size.ceil() as usize);
                 current_partition.push(example);
             }
         }
@@ -2008,7 +2007,7 @@ pub mod aiz_unstable {
             let mut rng = rand::thread_rng();
             let mut biases = Vec::with_capacity(node_layout.len());
             let mut weights = Vec::with_capacity(node_layout.len());
-            for (layer, previous_layer) in (&node_layout[1..node_layout.len()]).iter().zip((&node_layout[0..node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+            for (layer, previous_layer) in (node_layout[1..node_layout.len()]).iter().zip((node_layout[0..node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
                 let mut layer_biases = Vec::with_capacity(*layer);
                 let mut layer_weights = Vec::with_capacity(*layer);
                 for _ in 0..*layer {
@@ -2098,15 +2097,12 @@ pub mod aiz_unstable {
         fn build_zero_gradient(&self) -> Self::Gradient {
             let mut biases = Vec::with_capacity(self.node_layout.len());
             let mut weights = Vec::with_capacity(self.node_layout.len());
-            for (layer, previous_layer) in (&self.node_layout[1..self.node_layout.len()]).iter().zip((&self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
-                let mut layer_biases = Vec::with_capacity(*layer);
+            for (layer, previous_layer) in (self.node_layout[1..self.node_layout.len()]).iter().zip((self.node_layout[0..self.node_layout.len()-1]).iter()) { //first iteration is on the 2nd layer, layer num is 0 and refers to 1st layer making the previous layer
+                let layer_biases = vec![0.0; *layer];
                 let mut layer_weights = Vec::with_capacity(*layer);
                 for _ in 0..*layer {
-                    layer_biases.push(0.0);
-                    let mut node_weights = Vec::with_capacity(*previous_layer);
-                    for _ in 0..*previous_layer {
-                        node_weights.push(0.0);
-                    }
+                    //layer_biases.push(0.0);
+                    let node_weights = vec![0.0;*previous_layer];
                     layer_weights.push(node_weights);
                 }
                 biases.push(layer_biases);
@@ -2180,10 +2176,10 @@ pub mod aiz_unstable {
             network_activations[0..network_activations.len()-2].iter().rev())) {
                 let mut layer_biases_gradient = Vec::with_capacity(current_pre_activations.len());
                 let mut layer_weights_gradient = Vec::with_capacity(current_pre_activations.len());
-                for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).iter().zip(current_pre_activations.iter()) {
+                for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).zip(current_pre_activations.iter()) {
                     let mut new_node_derivative = 0.0;
-                    for (weight,forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
-                        new_node_derivative += *weight * forward_derivative;
+                    for (weight,forward_derivative) in input_node_weights.into_iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
+                        new_node_derivative += weight * forward_derivative;
                     }
                     new_node_derivative *= (self.derivative_activation_fn)(*node_pre_activation);
                     layer_biases_gradient.push(new_node_derivative);
@@ -2272,11 +2268,7 @@ pub mod aiz_unstable {
         }
 
         fn build_zero_flat_gradient(&self) -> Vec<f64> {
-            let mut output = Vec::new();
-            for _ in 0..self.get_num_params() {
-                output.push(0.0);
-            }
-            output
+            vec![0.0;self.get_num_params()]
         }
 
         //May be better to just store this in a variable, though its like no performance loss
@@ -2398,10 +2390,10 @@ pub mod aiz_unstable {
                 network_activations[0..network_activations.len()-1].iter().rev())) {
                     let mut layer_biases_gradient = Vec::with_capacity(current_pre_activations.len());
                     let mut layer_weights_gradient = Vec::with_capacity(current_pre_activations.len());
-                    for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).iter().zip(current_pre_activations.iter()) {
+                    for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).zip(current_pre_activations.iter()) {
                         let mut new_node_derivative = 0.0;
-                        for (weight,forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
-                            new_node_derivative += *weight * forward_derivative;
+                        for (weight,forward_derivative) in input_node_weights.into_iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
+                            new_node_derivative += weight * forward_derivative;
                         }
                         new_node_derivative *= (self.derivative_activation_fn)(*node_pre_activation);
                         layer_biases_gradient.push(new_node_derivative);
@@ -2416,10 +2408,10 @@ pub mod aiz_unstable {
                 }
 
                 let mut input_node_ders = Vec::with_capacity(self.node_layout[0]);
-                for input_node_weights in transpose_matrix(&self.weights[0]).iter() {
+                for input_node_weights in transpose_matrix(&self.weights[0]) {
                     let mut new_node_der = 0.0;
-                    for (weight, forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {
-                        new_node_der += *weight * forward_derivative;
+                    for (weight, forward_derivative) in input_node_weights.into_iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {
+                        new_node_der += weight * forward_derivative;
                     }
                     input_node_ders.push(new_node_der);
                 }
@@ -2458,10 +2450,10 @@ pub mod aiz_unstable {
                 network_activations[0..network_activations.len()-1].iter().rev())) {
                     let mut layer_biases_gradient = Vec::with_capacity(current_pre_activations.len());
                     let mut layer_weights_gradient = Vec::with_capacity(current_pre_activations.len());
-                    for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).iter().zip(current_pre_activations.iter()) {
+                    for (input_node_weights,node_pre_activation) in transpose_matrix(forward_layer_weights).zip(current_pre_activations.iter()) {
                         let mut new_node_derivative = 0.0;
-                        for (weight,forward_derivative) in input_node_weights.iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
-                            new_node_derivative += *weight * forward_derivative;
+                        for (weight,forward_derivative) in input_node_weights.into_iter().zip(biases_gradient[biases_gradient.len()-1].iter()) {//layer_node_derivatives.iter()) { //seems to work
+                            new_node_derivative += weight * forward_derivative;
                         }
                         new_node_derivative *= (self.derivative_activation_fn)(*node_pre_activation);
                         layer_biases_gradient.push(new_node_derivative);
@@ -2503,7 +2495,7 @@ pub mod aiz_unstable {
                 self.run(inputs)
             }
             fn os_subtract_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64) {
-                self.subtract_flat_gradient(&gradient, learning_rate);
+                self.subtract_flat_gradient(gradient, learning_rate);
             }
             fn os_add_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64) {
                 self.add_flat_gradient(gradient, learning_rate);
@@ -2935,7 +2927,9 @@ pub mod aiz_unstable {
 }
 
 #[cfg(test)]
+
 mod tests {
+
     use crate::aiz_unstable::MultiLayerPerceptron;
     use crate::aiz_unstable::SIGMOID;
 
@@ -3044,4 +3038,5 @@ mod tests {
         let mut network = splice::CompositeNetwork::new(vec![vec![0,1,2],vec![3,4],vec![5]],networks);
         network.backtracking_line_search_train(&vec![(vec![1.0,0.0,0.5],vec![0.69]),(vec![0.75,0.5,0.25],vec![0.420])], 1.0, 0.5, 0.5, 0.0125, 100)
     }
+
 }
