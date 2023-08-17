@@ -1,5 +1,5 @@
-use aiz::aiz; //change the structure so I dont need to do this dumb stuff
 use std::fs;
+use std::process::Command;
 
 fn label_to_vec(label: u8) -> Vec<f64> {
     match label {
@@ -50,7 +50,7 @@ fn read_n_parse_dataset() -> (Vec<(Vec<f64>,Vec<f64>)>,Vec<(Vec<f64>,Vec<f64>)>)
     let mut current_image_position = 0;
     for pixel in raw_training_image_file.into_iter() {
         if current_byte_num >= 16 {
-            current_image.push(pixel as f64/ 256.0f64);
+            current_image.push(pixel as f64/256.0f64);
             current_image_position += 1;
             if current_image_position == 784 {
                 current_image_position = 0;
@@ -79,7 +79,7 @@ fn read_n_parse_dataset() -> (Vec<(Vec<f64>,Vec<f64>)>,Vec<(Vec<f64>,Vec<f64>)>)
     let mut current_image_position = 0;
     for pixel in raw_test_image_file.into_iter() {
         if current_byte_num >= 16 {
-            current_image.push(pixel as f64/ 256.0f64);
+            current_image.push(pixel as f64/256.0f64);
             current_image_position += 1;
             if current_image_position == 784 {
                 current_image_position = 0;
@@ -94,34 +94,39 @@ fn read_n_parse_dataset() -> (Vec<(Vec<f64>,Vec<f64>)>,Vec<(Vec<f64>,Vec<f64>)>)
 
 }
 
+fn pixel_brightness_to_ascii_char(brightness: &f64) -> char {
+    let char_array = "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`\'.".chars().rev().collect::<Vec<char>>();
+    let adj_brightness = (brightness * 69.0).floor();
+    let output: char;
+    if adj_brightness ==  69.0 {
+        output = ' ';
+    } else {
+        output = char_array[adj_brightness as usize];
+    }
+    output
+}
+
+fn print_out_image_in_ascii(flattened_image: &Vec<f64>) {
+    let mut column_num = 0;
+    let mut output = String::new();
+    for pixel in flattened_image {
+        output.push(pixel_brightness_to_ascii_char(pixel));
+        output.push(' ');
+        column_num += 1;
+        if column_num % 28 == 0 {
+            output.push('\n');
+        }
+    }
+    print!("{}",output);
+}
+
 fn main() {
+    let mut anti_sleep_thread = Command::new("caffeinate").spawn().expect("Failed to run 'caffeinate'");
     let (training_data,test_data) = read_n_parse_dataset();
     println!("all data processed");
-    let mut best_nn = aiz::NeuralNetwork::new(vec![1,1]);
-    let mut best_nn_score = 10000.0;
-    for _ in 0..20 {
-        let mut nn = aiz::NeuralNetwork::new(vec![784,12,12,10]);
-        nn.back_propagation(&training_data, &test_data, (-3.0_f64).exp2(), true);
-        let nn_score = nn.test(&test_data);
-        if nn_score < best_nn_score {
-            println!("{}",nn_score);
-            best_nn = nn;
-            best_nn_score = nn_score;
-        }
-    }
-    best_nn.back_propagation(&training_data, &test_data, (-20.0_f64).exp2(), false);
-    let mut num_correct = 0;
-    for example in training_data {
-        if vec_to_label(best_nn.run(&example.0)) == vec_to_label(example.1) {
-            num_correct += 1;
-        }
-    }
-    println!("{}",num_correct);
-    let mut num_correct = 0;
-    for example in test_data {
-        if vec_to_label(best_nn.run(&example.0)) == vec_to_label(example.1) {
-            num_correct += 1;
-        }
-    }
-    println!("{}",num_correct);
+
+    
+    //let bytes = nn.into_bytes();
+    //fs::write("MNIST_nn_v3.aiz",&bytes[..]).expect("Failed to write to file");
+    anti_sleep_thread.kill().expect("Failed to kill 'caffeinate'");
 }
