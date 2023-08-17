@@ -1,13 +1,14 @@
+#![allow(clippy::too_many_arguments)] //its a given with this
+
 use rand::Rng; 
 //RNG, figure it out yourself
 use std::sync::mpsc; //communicating between threads
-use rand::seq::SliceRandom; //stochastic stuf
 use std::collections::VecDeque; //for l_bfgs memory buffer
 use std::thread; //multithreading
 
 //assumes all the inner vectors are the same length
 pub fn transpose_matrix<T>(matrix: &Vec<Vec<T>>) -> TransposedMatrix<'_,T> {
-    TransposedMatrix { matrix: matrix, row_index: 0 , matrix_dimension: matrix[0].len()}
+    TransposedMatrix { matrix, row_index: 0 , matrix_dimension: matrix[0].len()}
 }
 
 pub struct TransposedMatrix<'a,T>{
@@ -39,7 +40,7 @@ impl<'a,T> Iterator for TransposedMatrix<'a,T> {
 //Also: num_partitions is f64 for optimization reasons, 
 //in theory you could use that fact on purpose for cores with dif speeds
 //but it isnt for that
-pub fn partition_data<T>(data: &Vec<T>,num_partitions: f64) -> Vec<Vec<&T>> {
+pub fn partition_data<T>(data: &[T],num_partitions: f64) -> Vec<Vec<&T>> {
     let exact_partition_size = data.len() as f64 / num_partitions;
     let mut partitioned_data = Vec::new();
     let mut current_partition = Vec::new();
@@ -148,15 +149,14 @@ impl Gradient for (Vec<Vec<f64>>,Vec<Vec<Vec<f64>>>) { //MLP
 }
 
 pub trait NetworkInherentMethods: Network {
-    fn test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64;
-    fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64;
-    fn multithreaded_test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>,num_partitions: f64) -> f64;
-    fn back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> Self::Gradient;
-    fn multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> Self::Gradient;
-    fn stochastic_multithreaded_back_propagation(&self,training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>,batch_size: usize) -> Self::Gradient;
+    fn test(&self,test_data: &[(Vec<f64>,Vec<f64>)]) -> f64;
+    fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &[Vec<&(Vec<f64>,Vec<f64>)>]) -> f64;
+    fn multithreaded_test(&self,test_data: &[(Vec<f64>,Vec<f64>)],num_partitions: f64) -> f64;
+    fn back_propagation(&self,training_data: &[(Vec<f64>,Vec<f64>)]) -> Self::Gradient;
+    fn multithreaded_back_propagation(&self,partitioned_training_data: &[Vec<&(Vec<f64>,Vec<f64>)>]) -> Self::Gradient;
     fn backtracking_line_search_train(
         &mut self, 
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>, 
+        training_data: &[(Vec<f64>,Vec<f64>)], 
         first_checked_rate: f64, 
         rate_degradation_factor: f64, 
         tolerance_parameter: f64, 
@@ -165,19 +165,8 @@ pub trait NetworkInherentMethods: Network {
     );
     fn multithreaded_backtracking_line_search_train(
         &mut self, 
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>, 
+        training_data: &[(Vec<f64>,Vec<f64>)], 
         num_partitions: f64,
-        first_checked_rate: f64, 
-        rate_degradation_factor: f64, 
-        tolerance_parameter: f64, 
-        minimum_learning_rate: f64, 
-        max_iterations: u32
-    );
-    fn stochastic_multithreaded_backtracking_line_search_train(
-        &mut self, 
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>, 
-        num_partitions: f64,
-        batch_size: usize,
         first_checked_rate: f64, 
         rate_degradation_factor: f64, 
         tolerance_parameter: f64, 
@@ -187,7 +176,7 @@ pub trait NetworkInherentMethods: Network {
 }
 
 impl<T: Network> NetworkInherentMethods for T {
-    fn test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>) -> f64 {
+    fn test(&self,test_data: &[(Vec<f64>,Vec<f64>)]) -> f64 {
         let mut output = 0.0;
         for (test_in,test_expected_out) in test_data {
             for (single_real_out,single_expected_out) in self.run(test_in).iter().zip(test_expected_out.iter()) {
@@ -198,7 +187,7 @@ impl<T: Network> NetworkInherentMethods for T {
         output / test_data.len() as f64
     }
 
-    fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> f64 {
+    fn prepartitioned_multithreaded_test(&self,partitioned_test_data: &[Vec<&(Vec<f64>,Vec<f64>)>]) -> f64 {
         let mut output = 0.0;
         thread::scope(|scope| {
             let (original_transmitter,receiver) = mpsc::channel();
@@ -225,11 +214,11 @@ impl<T: Network> NetworkInherentMethods for T {
         output / length as f64
     }
 
-    fn multithreaded_test(&self,test_data: &Vec<(Vec<f64>,Vec<f64>)>,num_partitions: f64) -> f64 {
+    fn multithreaded_test(&self,test_data: &[(Vec<f64>,Vec<f64>)],num_partitions: f64) -> f64 {
         self.prepartitioned_multithreaded_test(&partition_data(test_data,num_partitions))
     }
 
-    fn back_propagation(&self,training_data: &Vec<(Vec<f64>,Vec<f64>)>) -> Self::Gradient {
+    fn back_propagation(&self,training_data: &[(Vec<f64>,Vec<f64>)]) -> Self::Gradient {
         let mut output_gradient = self.build_zero_gradient();
         for (training_in,training_out) in training_data {
             let current_gradient = self.one_example_back_propagation(training_in, training_out);
@@ -239,7 +228,7 @@ impl<T: Network> NetworkInherentMethods for T {
         output_gradient
     }
 
-    fn multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>) -> Self::Gradient {
+    fn multithreaded_back_propagation(&self,partitioned_training_data: &[Vec<&(Vec<f64>,Vec<f64>)>]) -> Self::Gradient {
         let mut output_gradient = self.build_zero_gradient();
         thread::scope(|scope| {
             let (original_transmitter,receiver) = mpsc::channel();
@@ -265,36 +254,9 @@ impl<T: Network> NetworkInherentMethods for T {
         output_gradient
     }
 
-    fn stochastic_multithreaded_back_propagation(&self,partitioned_training_data: &Vec<Vec<&(Vec<f64>,Vec<f64>)>>,batch_size: usize) -> Self::Gradient {
-        let mut output_gradient = self.build_zero_gradient();
-        thread::scope(|scope| {
-            let (original_transmitter,receiver) = mpsc::channel();
-            for partition in partitioned_training_data {
-                let cloned_transmitter = original_transmitter.clone();
-                scope.spawn(move || {
-                    let mut rng = rand::thread_rng();
-                    for (training_in,training_out) in partition.choose_multiple(&mut rng, batch_size) {
-                        let gradient_pair = self.one_example_back_propagation(training_in, training_out);
-                        cloned_transmitter.send(gradient_pair).unwrap();
-                    }
-                });
-            }
-            drop(original_transmitter);
-            for gradient in receiver {
-                output_gradient.add(gradient)
-            }
-        });
-        let mut data_length = 0;
-        for partition in partitioned_training_data {
-            data_length += partition.len()
-        }
-        output_gradient.div(data_length as f64);
-        output_gradient
-    }
-
     fn backtracking_line_search_train(
         &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+        training_data: &[(Vec<f64>,Vec<f64>)],
         first_checked_rate: f64,
         rate_degradation_factor: f64,
         tolerance_parameter: f64,
@@ -332,7 +294,7 @@ impl<T: Network> NetworkInherentMethods for T {
 
     fn multithreaded_backtracking_line_search_train(
         &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+        training_data: &[(Vec<f64>,Vec<f64>)],
         num_partitions: f64,
         first_checked_rate: f64,
         rate_degradation_factor: f64,
@@ -369,54 +331,13 @@ impl<T: Network> NetworkInherentMethods for T {
             iteration_num += 1;
         }
     }
-
-    fn stochastic_multithreaded_backtracking_line_search_train(
-        &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
-        num_partitions: f64,
-        batch_size: usize,
-        first_checked_rate: f64,
-        rate_degradation_factor: f64,
-        tolerance_parameter: f64,
-        minimum_learning_rate: f64,
-        max_iterations: u32
-    ) {
-        let partitioned_training_data = partition_data(training_data, num_partitions);
-        let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
-        println!("{}",previous_test);
-        let mut current_learning_rate = first_checked_rate * rate_degradation_factor;
-        let mut iteration_num = 0;
-        'main_loop: while iteration_num < max_iterations {
-            current_learning_rate /= rate_degradation_factor;
-            let gradient = self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size);
-            let tolerable_local_slope = tolerance_parameter * gradient.dot_product(&gradient);
-            self.subtract_gradient(&gradient,current_learning_rate);
-            let mut new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
-            println!("{}",new_test);
-            while previous_test - new_test < current_learning_rate * tolerable_local_slope {
-                println!("Improvement: {}",previous_test-new_test);
-                println!("Required:    {}", current_learning_rate * tolerable_local_slope);
-                current_learning_rate *= rate_degradation_factor;
-                println!("Looping: {}",current_learning_rate);
-                if current_learning_rate < minimum_learning_rate {
-                    self.subtract_gradient(&gradient, current_learning_rate / rate_degradation_factor);
-                    break 'main_loop;
-                }
-                self.subtract_gradient(&gradient, current_learning_rate-(current_learning_rate/rate_degradation_factor));
-                new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
-                println!("{}",new_test);
-            }
-            previous_test = new_test;
-            iteration_num += 1;
-        }
-    }
 }
 
 pub trait FlattenableGradient: Network {
     fn flatten_gradient(gradient: Self::Gradient) -> Vec<f64>;
     fn flatten_ref_gradient(gradient: &Self::Gradient) -> Vec<&f64>;
-    fn subtract_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64);
-    fn add_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64);
+    fn subtract_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64);
+    fn add_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64);
     fn build_zero_flat_gradient(&self) -> Vec<f64>;
     fn get_num_params(&self) -> usize;
 }
@@ -424,7 +345,7 @@ pub trait FlattenableGradient: Network {
 pub trait FlattenableGradientInherentMethods: FlattenableGradient {
     fn l_bfgs_train(
         &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+        training_data: &[(Vec<f64>,Vec<f64>)],
         iteration_memory: usize,
         first_checked_rate: f64,
         improvement_vs_curvature_bias: f64,
@@ -436,22 +357,8 @@ pub trait FlattenableGradientInherentMethods: FlattenableGradient {
 
     fn multithreaded_l_bfgs_train(
         &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+        training_data: &[(Vec<f64>,Vec<f64>)],
         num_partitions: f64,
-        iteration_memory: usize,
-        first_checked_rate: f64,
-        improvement_vs_curvature_bias: f64,
-        slope_tolerance_parameter: f64,
-        curvature_tolerance_parameter: f64,
-        max_line_search_iterations: u32,
-        max_iterations: u32
-    );
-
-    fn stochastic_multithreaded_l_bfgs_train(
-        &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
-        num_partitions: f64,
-        batch_size: usize,
         iteration_memory: usize,
         first_checked_rate: f64,
         improvement_vs_curvature_bias: f64,
@@ -465,7 +372,7 @@ pub trait FlattenableGradientInherentMethods: FlattenableGradient {
 impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
     fn l_bfgs_train(
         &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+        training_data: &[(Vec<f64>,Vec<f64>)],
         iteration_memory: usize,
         first_checked_rate: f64,
         improvement_vs_curvature_bias: f64,
@@ -641,7 +548,7 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
 
     fn multithreaded_l_bfgs_train(
         &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
+        training_data: &[(Vec<f64>,Vec<f64>)],
         num_partitions: f64,
         iteration_memory: usize,
         first_checked_rate: f64,
@@ -785,186 +692,6 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
                     continue
                 }
                 next_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
-                let mut new_local_slope = 0.0;
-                for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
-                    new_local_slope += param_search_amount * new_param_der;
-                }
-                if new_local_slope.abs() > tolerable_non_local_slope {
-                    highest_curvature_failure = applied_lr;
-                    continue
-                }
-                break
-            }
-            previous_test = new_test;
-            if p_mem.len() == iteration_memory {
-                network_change_mem.pop_front();
-                gradient_change_mem.pop_front();
-                p_mem.pop_front();
-            }
-            for param in search_direction.iter_mut() {
-                *param *= applied_lr;
-            }
-            let mut gradient_change = Vec::new();
-            for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
-                gradient_change.push(next_param_der-param_der);
-            }
-            let mut reciprocal_p = 0.0;
-            for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
-                reciprocal_p += param_search_amount * param_der_change;
-            }
-            network_change_mem.push_back(search_direction);
-            gradient_change_mem.push_back(gradient_change);
-            p_mem.push_back(1.0/reciprocal_p);
-        }
-    }
-
-    fn stochastic_multithreaded_l_bfgs_train(
-        &mut self,
-        training_data: &Vec<(Vec<f64>,Vec<f64>)>,
-        num_partitions: f64,
-        batch_size: usize,
-        iteration_memory: usize,
-        first_checked_rate: f64,
-        improvement_vs_curvature_bias: f64,
-        slope_tolerance_parameter: f64,
-        curvature_tolerance_parameter: f64,
-        max_line_search_iterations: u32,
-        max_iterations: u32
-    ) {
-        let partitioned_training_data = partition_data(training_data, num_partitions);
-
-        let mut network_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
-        let mut gradient_change_mem: VecDeque<Vec<f64>> = VecDeque::with_capacity(iteration_memory);
-        let mut p_mem = VecDeque::with_capacity(iteration_memory);
-
-        let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
-        let current_gradient = <Self>::flatten_gradient(self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size));
-        let mut search_direction = Vec::with_capacity(current_gradient.len());
-        let mut next_gradient = Vec::new();
-        for param_der in current_gradient.iter() {
-            search_direction.push(-param_der);
-        }
-        let mut applied_lr = 0.0;
-        let mut highest_curvature_failure = 0.0;
-        let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
-        let mut new_test = 0.0;
-        let mut local_slope = 0.0;
-        for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
-            local_slope += param_search_amount * param_der;
-        }
-        let tolerable_local_slope = slope_tolerance_parameter * local_slope;
-        let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
-        for _ in 0..max_line_search_iterations {
-            let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
-            self.add_flat_gradient(&search_direction, next_lr-applied_lr);
-            applied_lr = next_lr;
-            new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
-            println!("LR: {} \tTest: {}",applied_lr,new_test);
-            if new_test > previous_test + applied_lr * tolerable_local_slope {
-                lowest_improvement_failure = applied_lr;
-                continue
-            }
-            next_gradient = <Self>::flatten_gradient(self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size));
-            let mut new_local_slope = 0.0;
-            for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
-                new_local_slope += param_search_amount * new_param_der;
-            }
-            if new_local_slope.abs() > tolerable_non_local_slope {
-                highest_curvature_failure = applied_lr;
-                continue
-            }
-            break
-        }
-        previous_test = new_test;
-
-        for param in search_direction.iter_mut() {
-            *param *= applied_lr;
-        }
-        let mut gradient_change = Vec::new();
-        for (param_der,next_param_der) in current_gradient.iter().zip(next_gradient.iter()) {
-            gradient_change.push(next_param_der-param_der);
-        }
-        let mut reciprocal_p = 0.0;
-        for (param_search_amount,param_der_change) in search_direction.iter().zip(gradient_change.iter()) {
-            reciprocal_p += param_search_amount * param_der_change;
-        }
-        network_change_mem.push_back(search_direction);
-        gradient_change_mem.push_back(gradient_change);
-        p_mem.push_back(1.0/reciprocal_p);
-        
-        for _ in 1..max_iterations {
-            let current_gradient: Vec<f64> = next_gradient;
-            next_gradient = Vec::with_capacity(0);//cause rust doesnt want to skip the reinitialization
-            let mut search_direction = current_gradient.clone();
-            
-            let mut alpha_mem = Vec::new();
-            for (network_change,(gradient_change,p)) in (
-            network_change_mem.iter().zip(
-            gradient_change_mem.iter().zip(
-            p_mem.iter()))
-            ).rev() {
-                let mut alpha = 0.0;
-                for (param_change,param_search_amount) in network_change.iter().zip(search_direction.iter()) {
-                    alpha += param_change * param_search_amount;
-                }
-                alpha *= p;
-                for (param_search_amount,param_der_change) in search_direction.iter_mut().zip(gradient_change.iter()) {
-                    *param_search_amount -= alpha * param_der_change;
-                }
-                alpha_mem.push(alpha);
-            }
-
-            let mut mult_numerator = 0.0;
-            let mut mult_denominator = 0.0;
-            for (param_change,param_der_change) in network_change_mem[network_change_mem.len()-1].iter().zip(gradient_change_mem[gradient_change_mem.len()-1].iter()) {
-                mult_numerator += param_change * param_der_change;
-                mult_denominator += param_der_change * param_der_change;
-            }
-            let mult = mult_numerator/mult_denominator;
-            for param_search_amount in search_direction.iter_mut() {
-                *param_search_amount *= mult;
-            }
-
-            for (network_change,(gradient_change,(p,alpha))) in 
-            network_change_mem.iter().zip(
-            gradient_change_mem.iter().zip(
-            p_mem.iter().zip(
-            alpha_mem.iter().rev()
-            ))) {
-                let mut beta = 0.0;
-                for (param_der_change,param_search_amount) in gradient_change.iter().zip(search_direction.iter()) {
-                    beta += param_der_change * param_search_amount;
-                }
-                let alpha_beta_dif = alpha - beta * p;
-                for (param_search_amount,param_change) in search_direction.iter_mut().zip(network_change.iter()) {
-                    *param_search_amount += param_change * alpha_beta_dif;
-                }
-            }
-            for param in search_direction.iter_mut() {
-                *param *= -1.0;
-            }
-
-            let mut applied_lr = 0.0;
-            let mut highest_curvature_failure = 0.0;
-            let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
-            let mut new_test = 0.0;
-            let mut local_slope = 0.0;
-            for (param_search_amount,param_der) in search_direction.iter().zip(current_gradient.iter()) {
-                local_slope += param_search_amount * param_der;
-            }
-            let tolerable_local_slope = slope_tolerance_parameter * local_slope;
-            let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
-            for _ in 0..max_line_search_iterations {
-                let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
-                self.add_flat_gradient(&search_direction, next_lr-applied_lr);
-                applied_lr = next_lr;
-                new_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
-                println!("LR: {} \tTest: {}",applied_lr,new_test);
-                if new_test > previous_test + applied_lr * tolerable_local_slope {
-                    lowest_improvement_failure = applied_lr;
-                    continue
-                }
-                next_gradient = <Self>::flatten_gradient(self.stochastic_multithreaded_back_propagation(&partitioned_training_data,batch_size));
                 let mut new_local_slope = 0.0;
                 for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
                     new_local_slope += param_search_amount * new_param_der;
@@ -1223,9 +950,9 @@ impl FileSupport for MultiLayerPerceptron {
             }
         }
         MultiLayerPerceptron {
-            biases: biases,
-            weights: weights,
-            node_layout: node_layout,
+            biases,
+            weights,
+            node_layout,
             activation_fn: activation_fn.0,
             derivative_activation_fn: activation_fn.1
         }
@@ -1252,9 +979,9 @@ impl MultiLayerPerceptron {
             weights.push(layer_weights);
         }
         MultiLayerPerceptron {
-            biases: biases,
-            weights: weights,
-            node_layout: node_layout,
+            biases,
+            weights,
+            node_layout,
             activation_fn: activation_fn.0,
             derivative_activation_fn: activation_fn.1
         }
@@ -1465,7 +1192,7 @@ impl FlattenableGradient for MultiLayerPerceptron{
         output
     }
 
-    fn subtract_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64) {
+    fn subtract_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64) {
         let mut flat_gradient_iter = flat_gradient.iter();
         for layer_biases in &mut self.biases {
             for bias in layer_biases {
@@ -1481,7 +1208,7 @@ impl FlattenableGradient for MultiLayerPerceptron{
         }
     }
 
-    fn add_flat_gradient(&mut self,flat_gradient: &Vec<f64>,learning_rate: f64) {
+    fn add_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64) {
         let mut flat_gradient_iter = flat_gradient.iter();
         for layer_biases in &mut self.biases {
             for bias in layer_biases {
@@ -1712,8 +1439,8 @@ pub mod splice{
 
     pub trait ObjectSafeSpliceableNetwork: Send + Sync {
         fn os_run(&self, inputs: &[f64]) -> Vec<f64>;
-        fn os_subtract_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64);
-        fn os_add_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64);
+        fn os_subtract_gradient(&mut self,gradient: &[f64],learning_rate: f64);
+        fn os_add_gradient(&mut self,gradient: &[f64],learning_rate: f64);
         fn os_build_zero_gradient(&self) -> Vec<f64>;
         fn os_get_inputs(&self) -> usize;
         fn os_get_outputs(&self) -> usize;
@@ -1724,10 +1451,10 @@ pub mod splice{
         fn os_run(&self, inputs: &[f64]) -> Vec<f64> {
             self.run(inputs)
         }
-        fn os_subtract_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64) {
+        fn os_subtract_gradient(&mut self,gradient: &[f64],learning_rate: f64) {
             self.subtract_flat_gradient(gradient, learning_rate);
         }
-        fn os_add_gradient(&mut self,gradient: &Vec<f64>,learning_rate: f64) {
+        fn os_add_gradient(&mut self,gradient: &[f64],learning_rate: f64) {
             self.add_flat_gradient(gradient, learning_rate);
         }
         fn os_build_zero_gradient(&self) -> Vec<f64> {
@@ -1846,8 +1573,8 @@ pub mod splice{
     impl CompositeNetwork {
         pub fn new(network_layout: Vec<Vec<usize>>,networks: Vec<Box<dyn ObjectSafeSpliceableNetwork>>) -> Self {
             Self{
-                network_layout: network_layout,
-                networks: networks
+                network_layout,
+                networks
             }
         }
     }
@@ -1978,7 +1705,6 @@ pub mod splice{
         }
     }
 
-    //should be using chain runs for better performance
     impl<F: SpliceableNetwork,G: SpliceableNetwork> Network for DualSequentialNetwork<F,G> {
         type Gradient = (F::Gradient,G::Gradient);
 
@@ -2032,6 +1758,35 @@ pub mod splice{
         }
         fn get_outputs(&self) -> usize {
             self.right_network.get_outputs()
+        }
+    }
+
+    impl<F: SpliceableNetwork+FlattenableGradient,G: SpliceableNetwork+FlattenableGradient> FlattenableGradient for DualSequentialNetwork<F,G> {
+        fn flatten_gradient(gradient: Self::Gradient) -> Vec<f64> {
+            let mut output = <F>::flatten_gradient(gradient.0);
+            output.extend(<G>::flatten_gradient(gradient.1).into_iter());
+            output
+        }
+        fn flatten_ref_gradient(gradient: &Self::Gradient) -> Vec<&f64> {
+            let mut output = <F>::flatten_ref_gradient(&gradient.0);
+            output.extend(<G>::flatten_ref_gradient(&gradient.1).into_iter());
+            output
+        }
+        fn add_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64) {
+            self.left_network.add_flat_gradient(&flat_gradient[0..self.left_network.get_num_params()], learning_rate);
+            self.right_network.add_flat_gradient(&flat_gradient[self.left_network.get_num_params()..flat_gradient.len()], learning_rate);
+        }
+        fn subtract_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64) {
+            self.left_network.subtract_flat_gradient(&flat_gradient[0..self.left_network.get_num_params()], learning_rate);
+            self.right_network.subtract_flat_gradient(&flat_gradient[self.left_network.get_num_params()..flat_gradient.len()], learning_rate);
+        }
+        fn build_zero_flat_gradient(&self) -> Vec<f64> {
+            let mut output = self.left_network.build_zero_flat_gradient();
+            output.extend(self.right_network.build_zero_flat_gradient());
+            output
+        }
+        fn get_num_params(&self) -> usize {
+            self.left_network.get_num_params() + self.right_network.get_num_params()
         }
     }
 
@@ -2150,6 +1905,35 @@ pub mod splice{
             let (top_chain_ders,top_gradient) = self.top_network.chain_out_only_full_der_run(&output_node_ders[0..self.top_network.get_outputs()], s_run_info.0);
             let (bottom_chain_output,bottom_info) = self.bottom_network.chain_out_only_full_der_run(&output_node_ders[self.top_network.get_outputs()..output_node_ders.len()], s_run_info.1);
             (ChainOutput::Chain(Box::new(top_chain_ders.chain(bottom_chain_output))),(top_gradient,bottom_info))
+        }
+    }
+
+    impl<F: SpliceableNetwork+FlattenableGradient,G: SpliceableNetwork+FlattenableGradient> FlattenableGradient for DualParallelNetwork<F,G> {
+        fn flatten_gradient(gradient: Self::Gradient) -> Vec<f64> {
+            let mut output = <F>::flatten_gradient(gradient.0);
+            output.extend(<G>::flatten_gradient(gradient.1));
+            output
+        }
+        fn flatten_ref_gradient(gradient: &Self::Gradient) -> Vec<&f64> {
+            let mut output = <F>::flatten_ref_gradient(&gradient.0);
+            output.extend(<G>::flatten_ref_gradient(&gradient.1));
+            output
+        }
+        fn add_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64) {
+            self.top_network.add_flat_gradient(&flat_gradient[0..self.top_network.get_num_params()], learning_rate);
+            self.bottom_network.add_flat_gradient(&flat_gradient[self.top_network.get_num_params()..flat_gradient.len()], learning_rate);
+        }
+        fn subtract_flat_gradient(&mut self,flat_gradient: &[f64],learning_rate: f64) {
+            self.top_network.subtract_flat_gradient(&flat_gradient[0..self.top_network.get_num_params()], learning_rate);
+            self.bottom_network.subtract_flat_gradient(&flat_gradient[self.top_network.get_num_params()..flat_gradient.len()], learning_rate);
+        }
+        fn build_zero_flat_gradient(&self) -> Vec<f64> {
+            let mut output = self.top_network.build_zero_flat_gradient();
+            output.extend(self.bottom_network.build_zero_flat_gradient());
+            output
+        }
+        fn get_num_params(&self) -> usize {
+            self.top_network.get_num_params() + self.bottom_network.get_num_params()
         }
     }
 }
