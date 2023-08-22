@@ -212,6 +212,7 @@ impl<T: Network> NetworkInherentMethods for T {
             length += partition.len();
         }
         output / length as f64
+        
     }
 
     fn multithreaded_test(&self,test_data: &[(Vec<f64>,Vec<f64>)],num_partitions: f64) -> f64 {
@@ -402,6 +403,8 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
         }
         let tolerable_local_slope = slope_tolerance_parameter * local_slope;
         let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+
+        let mut lr_of_last_gradient_calculation = -1.0;
         for _ in 0..max_line_search_iterations {
             let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
             self.add_flat_gradient(&search_direction, next_lr-applied_lr);
@@ -413,6 +416,7 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
                 continue
             }
             next_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+            lr_of_last_gradient_calculation = applied_lr;
             let mut new_local_slope = 0.0;
             for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
                 new_local_slope += param_search_amount * new_param_der;
@@ -424,6 +428,10 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
             break
         }
         previous_test = new_test;
+
+        if applied_lr != lr_of_last_gradient_calculation {
+            next_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+        }
 
         for param in search_direction.iter_mut() {
             *param *= applied_lr;
@@ -502,6 +510,8 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
             }
             let tolerable_local_slope = slope_tolerance_parameter * local_slope;
             let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+
+            let mut lr_of_last_gradient_calculation = -1.0;
             for _ in 0..max_line_search_iterations {
                 let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
                 self.add_flat_gradient(&search_direction, next_lr-applied_lr);
@@ -513,6 +523,7 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
                     continue
                 }
                 next_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+                lr_of_last_gradient_calculation = applied_lr;
                 let mut new_local_slope = 0.0;
                 for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
                     new_local_slope += param_search_amount * new_param_der;
@@ -524,6 +535,11 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
                 break
             }
             previous_test = new_test;
+
+            if applied_lr != lr_of_last_gradient_calculation {
+                next_gradient = <Self>::flatten_gradient(self.back_propagation(training_data));
+            }
+
             if p_mem.len() == iteration_memory {
                 network_change_mem.pop_front();
                 gradient_change_mem.pop_front();
@@ -567,7 +583,7 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
         let mut previous_test = self.prepartitioned_multithreaded_test(&partitioned_training_data);
         let current_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
         let mut search_direction = Vec::with_capacity(current_gradient.len());
-        let mut next_gradient = Vec::new();
+        let mut next_gradient = Vec::with_capacity(0);
         for param_der in current_gradient.iter() {
             search_direction.push(-param_der);
         }
@@ -581,6 +597,8 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
         }
         let tolerable_local_slope = slope_tolerance_parameter * local_slope;
         let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+
+        let mut lr_of_last_gradient_calculation = -1.0;
         for _ in 0..max_line_search_iterations {
             let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
             self.add_flat_gradient(&search_direction, next_lr-applied_lr);
@@ -592,6 +610,7 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
                 continue
             }
             next_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
+            lr_of_last_gradient_calculation = applied_lr;
             let mut new_local_slope = 0.0;
             for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
                 new_local_slope += param_search_amount * new_param_der;
@@ -603,6 +622,10 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
             break
         }
         previous_test = new_test;
+
+        if applied_lr != lr_of_last_gradient_calculation {
+            next_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
+        }
 
         for param in search_direction.iter_mut() {
             *param *= applied_lr;
@@ -670,7 +693,7 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
             for param in search_direction.iter_mut() {
                 *param *= -1.0;
             }
-
+            
             let mut applied_lr = 0.0;
             let mut highest_curvature_failure = 0.0;
             let mut lowest_improvement_failure = first_checked_rate/improvement_vs_curvature_bias;
@@ -681,6 +704,8 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
             }
             let tolerable_local_slope = slope_tolerance_parameter * local_slope;
             let tolerable_non_local_slope = curvature_tolerance_parameter * local_slope.abs();
+
+            let mut lr_of_last_gradient_calculation = -1.0;
             for _ in 0..max_line_search_iterations {
                 let next_lr = (1.0-improvement_vs_curvature_bias) * highest_curvature_failure + improvement_vs_curvature_bias * lowest_improvement_failure;
                 self.add_flat_gradient(&search_direction, next_lr-applied_lr);
@@ -692,6 +717,7 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
                     continue
                 }
                 next_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
+                lr_of_last_gradient_calculation = applied_lr;
                 let mut new_local_slope = 0.0;
                 for (param_search_amount,new_param_der) in search_direction.iter().zip(next_gradient.iter()) {
                     new_local_slope += param_search_amount * new_param_der;
@@ -702,6 +728,11 @@ impl<T: FlattenableGradient> FlattenableGradientInherentMethods for T {
                 }
                 break
             }
+
+            if applied_lr != lr_of_last_gradient_calculation {
+                next_gradient = <Self>::flatten_gradient(self.multithreaded_back_propagation(&partitioned_training_data));
+            }
+
             previous_test = new_test;
             if p_mem.len() == iteration_memory {
                 network_change_mem.pop_front();
