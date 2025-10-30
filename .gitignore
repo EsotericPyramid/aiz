@@ -1,5 +1,4 @@
 /target
-/Cargo.lock
 /.DS_Store
 /MNIST_nn_v2.aiz
 /MNIST_nn_v3.aiz
